@@ -44,7 +44,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(_config_summary(config))
             return 0
         if arguments.command == "plan":
-            _print_json([_plan_summary(plan_policy(policy, now=now)) for policy in policies])
+            _print_json(
+                [_plan_summary(plan_policy(policy, now=now)) for policy in policies]
+            )
             return 0
         if arguments.command == "verify":
             destinations = sorted({policy.destination for policy in policies})
@@ -93,7 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="stream-archiver",
         description="Safely move complete old filesystem streams using declarative policies.",
     )
-    parser.add_argument("--config", type=Path, required=True, help="TOML configuration path")
+    parser.add_argument(
+        "--config", type=Path, required=True, help="TOML configuration path"
+    )
     parser.add_argument(
         "--policy",
         action="append",
@@ -109,7 +113,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check", help="validate configuration")
     subparsers.add_parser("plan", help="show eligible streams without modifying files")
-    subparsers.add_parser("verify", help="recompute archive hashes and success evidence")
+    subparsers.add_parser(
+        "verify", help="recompute archive hashes and success evidence"
+    )
 
     run = subparsers.add_parser("run", help="run selected policies immediately")
     run.add_argument("--lock-file", type=Path)
@@ -255,7 +261,9 @@ def _run_summary(result: PolicyRunResult) -> dict[str, object]:
                 "dropped_alias_symlinks": item.dropped_alias_symlinks,
                 "skipped_symlinks": item.skipped_symlinks,
                 "success_evidence": (
-                    str(item.success_evidence) if item.success_evidence is not None else None
+                    str(item.success_evidence)
+                    if item.success_evidence is not None
+                    else None
                 ),
             }
             for item in result.archives

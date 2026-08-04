@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from stream_archiver.errors import ExecutionError, RecoveryError
-from stream_archiver.model import ActionKind, ArchivePlan, Entry, EntryKind, PlannedAction
+from stream_archiver.model import (
+    ActionKind,
+    ArchivePlan,
+    Entry,
+    EntryKind,
+    PlannedAction,
+)
 
 COMPRESSION_LEVEL = 9
 MANIFEST_NAME = "MANIFEST.json"
@@ -82,7 +88,9 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
         final_directory = plan.final_directory
         if os.path.lexists(final_directory):
             if final_directory.is_symlink() or not final_directory.is_dir():
-                raise ExecutionError(f"archive path is not a real directory: {final_directory}")
+                raise ExecutionError(
+                    f"archive path is not a real directory: {final_directory}"
+                )
             manifest = _read_manifest(final_directory / MANIFEST_NAME, RecoveryError)
             _validate_plan_manifest_match(plan, manifest, final_directory)
             if manifest.get("cleanup_complete") is not True:
@@ -121,7 +129,9 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
     except OSError as exc:
         if staging_directory is not None and staging_directory.exists():
             shutil.rmtree(staging_directory, ignore_errors=True)
-        raise ExecutionError(f"filesystem operation failed for plan {plan.plan_id}: {exc}") from exc
+        raise ExecutionError(
+            f"filesystem operation failed for plan {plan.plan_id}: {exc}"
+        ) from exc
 
 
 def recover_pending_archives(
@@ -233,7 +243,9 @@ def _validate_plan_manifest_match(
     if manifest.get("source_root") != str(plan.source_root):
         raise ExecutionError(f"archive manifest source mismatch: {final_directory}")
     if manifest.get("destination_root") != str(plan.destination_root):
-        raise ExecutionError(f"archive manifest destination mismatch: {final_directory}")
+        raise ExecutionError(
+            f"archive manifest destination mismatch: {final_directory}"
+        )
     if manifest.get("archive_name") != plan.archive_name:
         raise ExecutionError(f"archive manifest name mismatch: {final_directory}")
 
@@ -331,7 +343,9 @@ def _write_regular_payload(
     try:
         source_fd = os.open(entry.absolute_path, flags)
     except OSError as exc:
-        raise ExecutionError(f"cannot open source safely: {entry.absolute_path}: {exc}") from exc
+        raise ExecutionError(
+            f"cannot open source safely: {entry.absolute_path}: {exc}"
+        ) from exc
 
     try:
         metadata = os.fstat(source_fd)
@@ -352,7 +366,9 @@ def _write_regular_payload(
                 elif compression is None:
                     _copy_and_hash(source_stream, raw_destination, source_hasher)
                 else:  # pragma: no cover - planner and manifest validation constrain codecs.
-                    raise ExecutionError(f"unsupported compression codec: {compression}")
+                    raise ExecutionError(
+                        f"unsupported compression codec: {compression}"
+                    )
                 raw_destination.flush()
                 os.fsync(raw_destination.fileno())
     finally:
@@ -427,7 +443,9 @@ def _validate_all_sources(manifest: dict[str, Any], source_root: Path) -> None:
             continue
         source = source_root / Path(record["source_path"])
         if not os.path.lexists(source):
-            raise ExecutionError(f"selected source disappeared before cleanup: {source}")
+            raise ExecutionError(
+                f"selected source disappeared before cleanup: {source}"
+            )
         _validate_source_record(source, record, error_type=ExecutionError)
 
 
@@ -496,7 +514,9 @@ def _validate_source_record(
     try:
         metadata = source.lstat()
     except OSError as exc:
-        raise error_type(f"cannot inspect source during cleanup: {source}: {exc}") from exc
+        raise error_type(
+            f"cannot inspect source during cleanup: {source}: {exc}"
+        ) from exc
 
     expected = record["identity"]
     actual = {
@@ -510,15 +530,22 @@ def _validate_source_record(
         raise error_type(f"source changed after planning; refusing cleanup: {source}")
 
     if record["source_kind"] == EntryKind.SYMLINK.value:
-        if not stat.S_ISLNK(metadata.st_mode) or os.readlink(source) != record["link_target"]:
-            raise error_type(f"symlink changed after planning; refusing cleanup: {source}")
+        if (
+            not stat.S_ISLNK(metadata.st_mode)
+            or os.readlink(source) != record["link_target"]
+        ):
+            raise error_type(
+                f"symlink changed after planning; refusing cleanup: {source}"
+            )
         return
 
     if not stat.S_ISREG(metadata.st_mode):
         raise error_type(f"source is no longer a regular file: {source}")
     expected_digest = record.get("source_sha256")
     if expected_digest is not None and _sha256_regular_file(source) != expected_digest:
-        raise error_type(f"source content changed after planning; refusing cleanup: {source}")
+        raise error_type(
+            f"source content changed after planning; refusing cleanup: {source}"
+        )
 
 
 def _assert_regular_identity(entry: Entry, metadata: os.stat_result) -> None:
@@ -530,7 +557,13 @@ def _assert_regular_identity(entry: Entry, metadata: os.stat_result) -> None:
         metadata.st_size,
         metadata.st_mtime_ns,
     )
-    wanted = (expected.device, expected.inode, expected.mode, expected.size, expected.mtime_ns)
+    wanted = (
+        expected.device,
+        expected.inode,
+        expected.mode,
+        expected.size,
+        expected.mtime_ns,
+    )
     if actual != wanted or not stat.S_ISREG(metadata.st_mode):
         raise ExecutionError(f"source changed after planning: {entry.absolute_path}")
 
@@ -547,14 +580,23 @@ def _verify_archive_payloads(
             continue
         archive_path = directory / Path(record["archive_path"])
         if action is ActionKind.PRESERVE_SYMLINK:
-            if not archive_path.is_symlink() or os.readlink(archive_path) != record["link_target"]:
-                raise RecoveryError(f"archived symlink does not match manifest: {archive_path}")
+            if (
+                not archive_path.is_symlink()
+                or os.readlink(archive_path) != record["link_target"]
+            ):
+                raise RecoveryError(
+                    f"archived symlink does not match manifest: {archive_path}"
+                )
             preserved_symlinks += 1
             continue
 
         if archive_path.is_symlink() or not archive_path.is_file():
-            raise RecoveryError(f"archived payload is not a regular file: {archive_path}")
-        if archive_path.stat().st_size != record.get("archive_size", archive_path.stat().st_size):
+            raise RecoveryError(
+                f"archived payload is not a regular file: {archive_path}"
+            )
+        if archive_path.stat().st_size != record.get(
+            "archive_size", archive_path.stat().st_size
+        ):
             raise RecoveryError(f"archived payload size mismatch: {archive_path}")
         archive_digest = _sha256_regular_file(archive_path)
         if archive_digest != record["archive_sha256"]:
@@ -643,7 +685,9 @@ def _sha256_regular_file(path: Path) -> str:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise RecoveryError(f"cannot open regular file for hashing {path}: {exc}") from exc
+        raise RecoveryError(
+            f"cannot open regular file for hashing {path}: {exc}"
+        ) from exc
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -758,7 +802,9 @@ def _validate_manifest(
     if not Path(manifest["source_root"]).is_absolute():
         raise error_type(f"source_root must be absolute in archive manifest {path}")
     if not Path(manifest["destination_root"]).is_absolute():
-        raise error_type(f"destination_root must be absolute in archive manifest {path}")
+        raise error_type(
+            f"destination_root must be absolute in archive manifest {path}"
+        )
     if not isinstance(manifest.get("cleanup_complete"), bool):
         raise error_type(f"invalid cleanup_complete in archive manifest {path}")
 
@@ -817,7 +863,12 @@ def _validate_manifest_record(
     elif archive_path is not None:
         raise error_type(f"{context} must not define archive_path for {action.value}")
 
-    regular_actions = {ActionKind.MOVE, ActionKind.COPY, ActionKind.GZIP, ActionKind.BZ2}
+    regular_actions = {
+        ActionKind.MOVE,
+        ActionKind.COPY,
+        ActionKind.GZIP,
+        ActionKind.BZ2,
+    }
     symlink_actions = {
         ActionKind.PRESERVE_SYMLINK,
         ActionKind.DROP_ALIAS_SYMLINK,
@@ -832,7 +883,9 @@ def _validate_manifest_record(
         if action not in regular_actions:
             raise error_type(f"{context} has a symlink action for a regular file")
         if record.get("link_target") is not None:
-            raise error_type(f"{context} must not define link_target for a regular file")
+            raise error_type(
+                f"{context} must not define link_target for a regular file"
+            )
 
     identity = record.get("identity")
     if not isinstance(identity, dict):
@@ -847,7 +900,10 @@ def _validate_manifest_record(
         if not _is_sha256(source_digest) or not _is_sha256(archive_digest):
             raise error_type(f"{context} has invalid regular-file digests")
         if version == MANIFEST_FORMAT_VERSION:
-            if not isinstance(record.get("archive_size"), int) or record["archive_size"] < 0:
+            if (
+                not isinstance(record.get("archive_size"), int)
+                or record["archive_size"] < 0
+            ):
                 raise error_type(f"{context} has invalid archive_size")
             expected_compression = _compression_for_action(action)
             if record.get("compression") != expected_compression:
@@ -883,7 +939,9 @@ def _safe_manifest_relative_path(
     return relative
 
 
-def _result_from_manifest(directory: Path, manifest: dict[str, Any]) -> ArchiveExecutionResult:
+def _result_from_manifest(
+    directory: Path, manifest: dict[str, Any]
+) -> ArchiveExecutionResult:
     counts = {kind: 0 for kind in ActionKind}
     for record in manifest["entries"]:
         counts[ActionKind(record["action"])] += 1
@@ -901,7 +959,9 @@ def _result_from_manifest(directory: Path, manifest: dict[str, Any]) -> ArchiveE
         preserved_symlinks=counts[ActionKind.PRESERVE_SYMLINK],
         dropped_alias_symlinks=counts[ActionKind.DROP_ALIAS_SYMLINK],
         skipped_symlinks=counts[ActionKind.SKIP_SYMLINK],
-        success_evidence=(success if success.is_file() and not success.is_symlink() else None),
+        success_evidence=(
+            success if success.is_file() and not success.is_symlink() else None
+        ),
     )
 
 
@@ -915,7 +975,11 @@ def _set_symlink_mtime(path: Path, mtime_ns: int) -> None:
 
 def _remove_empty_source_directories(source_root: Path) -> None:
     directories = sorted(
-        (path for path in source_root.rglob("*") if path.is_dir() and not path.is_symlink()),
+        (
+            path
+            for path in source_root.rglob("*")
+            if path.is_dir() and not path.is_symlink()
+        ),
         key=lambda path: len(path.parts),
         reverse=True,
     )

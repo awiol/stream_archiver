@@ -81,10 +81,7 @@ def _entry_ns(name: str, mtime_ns: int) -> Entry:
 def test_age_cutoff_uses_exact_integer_nanoseconds() -> None:
     """An entry at the cutoff is eligible while one nanosecond newer is not."""
 
-    cutoff_ns = (
-        int(NOW.timestamp()) * 1_000_000_000
-        - 30 * 24 * 60 * 60 * 1_000_000_000
-    )
+    cutoff_ns = int(NOW.timestamp()) * 1_000_000_000 - 30 * 24 * 60 * 60 * 1_000_000_000
     exact_stream = split_streams(
         (_entry_ns("exact", cutoff_ns),), minimum_gap=timedelta(hours=8)
     )
@@ -92,13 +89,12 @@ def test_age_cutoff_uses_exact_integer_nanoseconds() -> None:
         (_entry_ns("newer", cutoff_ns + 1),), minimum_gap=timedelta(hours=8)
     )
 
-    assert select_eligible_streams(
-        exact_stream, now=NOW, minimum_age=timedelta(days=30)
-    ) == exact_stream
     assert (
-        select_eligible_streams(
-            newer_stream, now=NOW, minimum_age=timedelta(days=30)
-        )
+        select_eligible_streams(exact_stream, now=NOW, minimum_age=timedelta(days=30))
+        == exact_stream
+    )
+    assert (
+        select_eligible_streams(newer_stream, now=NOW, minimum_age=timedelta(days=30))
         == ()
     )
 

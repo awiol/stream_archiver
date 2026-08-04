@@ -49,7 +49,9 @@ def load_state(path: Path) -> DueState:
         raise ExecutionError(f"unsupported due-state version in {path}")
     last_success_raw = raw.get("last_success")
     if not isinstance(last_success_raw, dict):
-        raise ExecutionError(f"invalid due state in {path}: last_success must be an object")
+        raise ExecutionError(
+            f"invalid due state in {path}: last_success must be an object"
+        )
 
     parsed: dict[str, datetime] = {}
     for name, timestamp in last_success_raw.items():
@@ -58,9 +60,13 @@ def load_state(path: Path) -> DueState:
         try:
             moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         except ValueError as exc:
-            raise ExecutionError(f"invalid timestamp for policy {name!r} in {path}") from exc
+            raise ExecutionError(
+                f"invalid timestamp for policy {name!r} in {path}"
+            ) from exc
         if moment.tzinfo is None or moment.utcoffset() is None:
-            raise ExecutionError(f"timestamp for policy {name!r} in {path} must include an offset")
+            raise ExecutionError(
+                f"timestamp for policy {name!r} in {path} must include an offset"
+            )
         parsed[name] = moment.astimezone(timezone.utc)
     return DueState(parsed)
 

@@ -20,7 +20,9 @@ def execution_lock(path: Path) -> Iterator[None]:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise LockUnavailableError(f"another stream-archiver run owns {path}") from exc
+            raise LockUnavailableError(
+                f"another stream-archiver run owns {path}"
+            ) from exc
         yield
     finally:
         try:

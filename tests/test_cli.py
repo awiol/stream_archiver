@@ -12,7 +12,9 @@ from tests.helpers import write_at
 NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
 
 
-def test_run_if_due_archives_once_then_reports_not_due(tmp_path: Path, capsys: object) -> None:
+def test_run_if_due_archives_once_then_reports_not_due(
+    tmp_path: Path, capsys: object
+) -> None:
     """Frequent invocations perform the first due run and suppress the next early run."""
 
     source = tmp_path / "source"

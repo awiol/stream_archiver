@@ -17,7 +17,11 @@ from stream_archiver.executor import (
     verify_archive,
 )
 from stream_archiver.model import ArchivePlan
-from stream_archiver.planning import build_archive_plan, select_eligible_streams, split_streams
+from stream_archiver.planning import (
+    build_archive_plan,
+    select_eligible_streams,
+    split_streams,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +140,11 @@ def verify_destination(destination: Path) -> tuple[ArchiveVerificationResult, ..
         return ()
     results: list[ArchiveVerificationResult] = []
     for child in sorted(destination.iterdir()):
-        if child.name == ".stream-archiver-staging" or child.is_symlink() or not child.is_dir():
+        if (
+            child.name == ".stream-archiver-staging"
+            or child.is_symlink()
+            or not child.is_dir()
+        ):
             continue
         if not (child / MANIFEST_NAME).is_file():
             continue

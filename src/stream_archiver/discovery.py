@@ -39,7 +39,9 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                raise ExecutionError(f"cannot inspect source entry {path}: {exc}") from exc
+                raise ExecutionError(
+                    f"cannot inspect source entry {path}: {exc}"
+                ) from exc
             if stat.S_ISLNK(metadata.st_mode):
                 entries.append(_entry_from_stat(source, path, metadata))
             else:
@@ -55,7 +57,9 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
             if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 entries.append(_entry_from_stat(source, path, metadata))
 
-    return tuple(sorted(entries, key=lambda item: (item.mtime_ns, item.relative_path.as_posix())))
+    return tuple(
+        sorted(entries, key=lambda item: (item.mtime_ns, item.relative_path.as_posix()))
+    )
 
 
 def _entry_from_stat(source: Path, path: Path, metadata: os.stat_result) -> Entry:

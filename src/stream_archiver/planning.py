@@ -28,7 +28,9 @@ _RESERVED_ARCHIVE_PATHS = frozenset(
 )
 
 
-def split_streams(entries: tuple[Entry, ...], *, minimum_gap: timedelta) -> tuple[Stream, ...]:
+def split_streams(
+    entries: tuple[Entry, ...], *, minimum_gap: timedelta
+) -> tuple[Stream, ...]:
     """Split ordered entries whenever an adjacent gap is at least ``minimum_gap``."""
 
     if minimum_gap <= timedelta(0):
@@ -72,7 +74,9 @@ def build_archive_plan(
     """
 
     if source_root not in policy.sources:
-        raise PlanningError(f"source is not owned by policy {policy.name!r}: {source_root}")
+        raise PlanningError(
+            f"source is not owned by policy {policy.name!r}: {source_root}"
+        )
 
     regular_identities = {
         (entry.identity.device, entry.identity.inode)
@@ -124,13 +128,17 @@ def _plan_entry(
             return PlannedAction(
                 source=entry,
                 kind=ActionKind.GZIP,
-                archive_path=entry.relative_path.with_name(entry.relative_path.name + ".gz"),
+                archive_path=entry.relative_path.with_name(
+                    entry.relative_path.name + ".gz"
+                ),
             )
         if codec is CompressionCodec.BZ2:
             return PlannedAction(
                 source=entry,
                 kind=ActionKind.BZ2,
-                archive_path=entry.relative_path.with_name(entry.relative_path.name + ".bz2"),
+                archive_path=entry.relative_path.with_name(
+                    entry.relative_path.name + ".bz2"
+                ),
             )
         return PlannedAction(entry, ActionKind.MOVE, entry.relative_path)
 
@@ -192,7 +200,9 @@ def _plan_id(
                 "kind": action.source.kind.value,
                 "action": action.kind.value,
                 "archive_path": (
-                    action.archive_path.as_posix() if action.archive_path is not None else None
+                    action.archive_path.as_posix()
+                    if action.archive_path is not None
+                    else None
                 ),
                 "device": action.source.identity.device,
                 "inode": action.source.identity.inode,

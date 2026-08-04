@@ -11,13 +11,14 @@ from stream_archiver.config import (
     CompressionCodec,
     CompressionRule,
     Policy,
-    SymlinkRule,
     load_config,
 )
 from stream_archiver.errors import ConfigurationError
 
 
-def test_load_config_shares_policy_settings_across_multiple_sources(tmp_path: Path) -> None:
+def test_load_config_shares_policy_settings_across_multiple_sources(
+    tmp_path: Path,
+) -> None:
     """One policy can reuse settings without merging the source roots."""
 
     destination = tmp_path / "archive"
@@ -29,7 +30,7 @@ run_interval = "30d"
 
 [[policies]]
 name = "reports"
-sources = ["{tmp_path / 'reports-a'}", "{tmp_path / 'reports-b'}"]
+sources = ["{tmp_path / "reports-a"}", "{tmp_path / "reports-b"}"]
 destination = "{destination}"
 minimum_age = "30d"
 stream_gap = "8h"
@@ -45,7 +46,7 @@ compression = "bz2"
 
 [[policies]]
 name = "logs"
-sources = ["{tmp_path / 'logs'}"]
+sources = ["{tmp_path / "logs"}"]
 destination = "{destination}"
 minimum_age = "6w"
 stream_gap = "12h"
@@ -75,8 +76,8 @@ def test_load_config_accepts_legacy_singular_source(tmp_path: Path) -> None:
 schema_version = 1
 [[policies]]
 name = "legacy"
-source = "{tmp_path / 'source'}"
-destination = "{tmp_path / 'archive'}"
+source = "{tmp_path / "source"}"
+destination = "{tmp_path / "archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -98,8 +99,8 @@ def test_load_config_rejects_unsupported_compression(tmp_path: Path) -> None:
 schema_version = 2
 [[policies]]
 name = "reports"
-sources = ["{tmp_path / 'source'}"]
-destination = "{tmp_path / 'archive'}"
+sources = ["{tmp_path / "source"}"]
+destination = "{tmp_path / "archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -123,8 +124,8 @@ def test_load_config_rejects_compression_level_override(tmp_path: Path) -> None:
 schema_version = 2
 [[policies]]
 name = "reports"
-sources = ["{tmp_path / 'source'}"]
-destination = "{tmp_path / 'archive'}"
+sources = ["{tmp_path / "source"}"]
+destination = "{tmp_path / "archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -149,9 +150,9 @@ def test_load_config_requires_exactly_one_source_form(tmp_path: Path) -> None:
 schema_version = 2
 [[policies]]
 name = "reports"
-source = "{tmp_path / 'source'}"
-sources = ["{tmp_path / 'other'}"]
-destination = "{tmp_path / 'archive'}"
+source = "{tmp_path / "source"}"
+sources = ["{tmp_path / "other"}"]
+destination = "{tmp_path / "archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -174,7 +175,7 @@ schema_version = 2
 [[policies]]
 name = "reports"
 sources = ["{source}"]
-destination = "{source / 'archive'}"
+destination = "{source / "archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -186,7 +187,9 @@ symlink_rule = "ignore"
         load_config(config_path)
 
 
-def test_load_config_rejects_overlapping_sources_across_policies(tmp_path: Path) -> None:
+def test_load_config_rejects_overlapping_sources_across_policies(
+    tmp_path: Path,
+) -> None:
     """No two source roots may own the same file tree."""
 
     shared = tmp_path / "shared"
@@ -197,15 +200,15 @@ schema_version = 2
 [[policies]]
 name = "first"
 sources = ["{shared}"]
-destination = "{tmp_path / 'first-archive'}"
+destination = "{tmp_path / "first-archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
 
 [[policies]]
 name = "second"
-sources = ["{shared / 'nested'}"]
-destination = "{tmp_path / 'second-archive'}"
+sources = ["{shared / "nested"}"]
+destination = "{tmp_path / "second-archive"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"
@@ -227,7 +230,7 @@ def test_load_config_allows_equal_destinations(tmp_path: Path) -> None:
 schema_version = 2
 [[policies]]
 name = "first"
-sources = ["{tmp_path / 'first'}"]
+sources = ["{tmp_path / "first"}"]
 destination = "{destination}"
 minimum_age = "30d"
 stream_gap = "8h"
@@ -235,7 +238,7 @@ symlink_rule = "ignore"
 
 [[policies]]
 name = "second"
-sources = ["{tmp_path / 'second'}"]
+sources = ["{tmp_path / "second"}"]
 destination = "{destination}"
 minimum_age = "30d"
 stream_gap = "8h"
@@ -259,7 +262,7 @@ def test_load_config_rejects_nested_destination_roots(tmp_path: Path) -> None:
 schema_version = 2
 [[policies]]
 name = "first"
-sources = ["{tmp_path / 'first'}"]
+sources = ["{tmp_path / "first"}"]
 destination = "{destination}"
 minimum_age = "30d"
 stream_gap = "8h"
@@ -267,8 +270,8 @@ symlink_rule = "ignore"
 
 [[policies]]
 name = "second"
-sources = ["{tmp_path / 'second'}"]
-destination = "{destination / 'nested'}"
+sources = ["{tmp_path / "second"}"]
+destination = "{destination / "nested"}"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "ignore"

@@ -20,9 +20,14 @@ def test_public_package_objects_have_explanatory_docstrings() -> None:
     ):
         module = importlib.import_module(module_info.name)
         for name, value in vars(module).items():
-            if name.startswith("_") or getattr(value, "__module__", None) != module.__name__:
+            if (
+                name.startswith("_")
+                or getattr(value, "__module__", None) != module.__name__
+            ):
                 continue
-            if (inspect.isclass(value) or inspect.isfunction(value)) and not inspect.getdoc(value):
+            if (
+                inspect.isclass(value) or inspect.isfunction(value)
+            ) and not inspect.getdoc(value):
                 missing.append(f"{module.__name__}.{name}")
 
     assert missing == []
@@ -36,9 +41,9 @@ def test_behavior_tests_explain_setup_and_contract() -> None:
     for path in sorted(tests_root.glob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
-                "test_"
-            ):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name.startswith("test_"):
                 if ast.get_docstring(node) is None:
                     missing.append(f"{path.name}:{node.name}")
 
