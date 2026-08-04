@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stream-archiver"
+version = "0.2.0"
+description = "Policy-driven safe movement of complete, old filesystem streams."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Archiving",
+]
+
+[project.scripts]
+stream-archiver = "stream_archiver.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "coverage>=7.6",
+  "pytest>=8.3",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--import-mode=importlib",
+  "--strict-config",
+  "--strict-markers",
+  "-ra",
+]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["stream_archiver"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

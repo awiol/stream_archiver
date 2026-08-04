@@ -1,0 +1,41 @@
+# Copy to /etc/stream-archiver/policies.toml and replace every path.
+# Durations use a positive integer followed by s, m, h, d, or w.
+
+schema_version = 2
+
+# systemd may check daily, but a policy runs only after this interval has
+# elapsed since its last successful completion.
+run_interval = "30d"
+
+[[policies]]
+# Sources share policy settings but are planned and archived independently.
+name = "generated-reports"
+sources = [
+  "/srv/application/generated-reports-a",
+  "/srv/application/generated-reports-b",
+]
+# The same exact destination may be reused by another policy.
+destination = "/srv/archive/application-output"
+minimum_age = "30d"
+stream_gap = "8h"
+symlink_rule = "drop-aliases-preserve-relative"
+
+[[policies.compression_rules]]
+suffixes = [".json"]
+compression = "gzip"
+
+[[policies.compression_rules]]
+suffixes = [".html"]
+compression = "bz2"
+
+[[policies]]
+name = "batch-exports"
+sources = ["/srv/application/batch-exports"]
+destination = "/srv/archive/application-output"
+minimum_age = "45d"
+stream_gap = "12h"
+symlink_rule = "preserve-relative"
+
+[[policies.compression_rules]]
+suffixes = [".json", ".html"]
+compression = "bz2"

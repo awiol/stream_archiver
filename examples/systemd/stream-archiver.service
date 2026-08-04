@@ -1,0 +1,38 @@
+[Unit]
+Description=Archive complete old filesystem streams
+Documentation=file:/opt/stream-archiver-0.2.0/README.md
+ConditionPathExists=/etc/stream-archiver/policies.toml
+
+[Service]
+Type=oneshot
+User=stream-archiver
+Group=stream-archiver
+
+ExecStart=/opt/stream-archiver-0.2.0/.venv/bin/stream-archiver \
+    --config /etc/stream-archiver/policies.toml \
+    run-if-due \
+    --state /var/lib/stream-archiver/state.json \
+    --lock-file /run/stream-archiver/execution.lock
+
+StateDirectory=stream-archiver
+RuntimeDirectory=stream-archiver
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Replace these example paths with every configured source and destination.
+# Sources require write access because successful archival removes them.
+ReadWritePaths=/srv/application/generated-reports-a
+ReadWritePaths=/srv/application/generated-reports-b
+ReadWritePaths=/srv/application/batch-exports
+ReadWritePaths=/srv/archive/application-output
+
+Nice=10
+IOSchedulingClass=idle
