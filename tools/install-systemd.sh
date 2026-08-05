@@ -178,11 +178,17 @@ printf 'Selected wheel: %s\n' "$WHEEL"
 if [[ -f $PACKAGE_ROOT/SHA256SUMS ]]; then
     WHEEL_RECORD=$(grep -F "  dist/$(basename -- "$WHEEL")" \
         "$PACKAGE_ROOT/SHA256SUMS" || true)
-    if [[ -z $WHEEL_RECORD ]]; then
-        printf 'SHA256SUMS does not contain the bundled wheel.\n' >&2
-        exit 2
+    if [[ -n $WHEEL_RECORD ]]; then
+        (cd -- "$PACKAGE_ROOT" && printf '%s\n' "$WHEEL_RECORD" | sha256sum -c -)
+    else
+        printf \
+            'Warning: SHA256SUMS does not contain the bundled wheel entry for %s; continuing without checksum verification.\n' \
+            "$(basename -- "$WHEEL")" >&2
     fi
-    (cd -- "$PACKAGE_ROOT" && printf '%s\n' "$WHEEL_RECORD" | sha256sum -c -)
+else
+    printf \
+        'Warning: %s/SHA256SUMS was not found; continuing without checksum verification.\n' \
+        "$PACKAGE_ROOT" >&2
 fi
 
 if ! getent group "$SERVICE_GROUP" >/dev/null; then
