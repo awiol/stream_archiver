@@ -132,12 +132,49 @@ PACKAGE_ROOT=$(cd -- "$SCRIPT_DIRECTORY/.." && pwd -P)
 shopt -s nullglob
 WHEELS=("$PACKAGE_ROOT"/dist/stream_archiver-*.whl)
 shopt -u nullglob
-if [[ ${#WHEELS[@]} -ne 1 ]]; then
-    printf 'Expected exactly one wheel under %s/dist; found %d.\n' \
-        "$PACKAGE_ROOT" "${#WHEELS[@]}" >&2
+if [[ ${#WHEELS[@]} -eq 0 ]]; then
+    printf 'No stream-archiver wheel found under %s/dist.\n' \
+        "$PACKAGE_ROOT" >&2
     exit 2
 fi
-WHEEL=${WHEELS[0]}
+
+PROJECT_VERSION=$(sed -n \
+    '/^\[project\][[:space:]]*$/,/^\[/ {
+        s/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p
+    }' \
+    "$PACKAGE_ROOT/pyproject.toml" | head -n 1)
+
+MATCHING_WHEELS=()
+if [[ -n $PROJECT_VERSION ]]; then
+    shopt -s nullglob
+    MATCHING_WHEELS=(
+        "$PACKAGE_ROOT"/dist/stream_archiver-"$PROJECT_VERSION"-*.whl
+    )
+    shopt -u nullglob
+fi
+
+if [[ ${#MATCHING_WHEELS[@]} -gt 0 ]]; then
+    CANDIDATE_WHEELS=("${MATCHING_WHEELS[@]}")
+else
+    CANDIDATE_WHEELS=("${WHEELS[@]}")
+    if [[ -n $PROJECT_VERSION ]]; then
+        printf \
+            'No wheel matches project version %s; selecting the newest available wheel.\n' \
+            "$PROJECT_VERSION" >&2
+    else
+        printf \
+            'Could not read the project version; selecting the newest available wheel.\n' \
+            >&2
+    fi
+fi
+
+WHEEL=${CANDIDATE_WHEELS[0]}
+for CANDIDATE in "${CANDIDATE_WHEELS[@]:1}"; do
+    if [[ $CANDIDATE -nt $WHEEL ]]; then
+        WHEEL=$CANDIDATE
+    fi
+done
+printf 'Selected wheel: %s\n' "$WHEEL"
 if [[ -f $PACKAGE_ROOT/SHA256SUMS ]]; then
     WHEEL_RECORD=$(grep -F "  dist/$(basename -- "$WHEEL")" \
         "$PACKAGE_ROOT/SHA256SUMS" || true)
