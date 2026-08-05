@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,11 +18,14 @@ from stream_archiver.executor import (
     verify_archive,
 )
 from stream_archiver.model import ArchivePlan
+from stream_archiver.observability import log_event
 from stream_archiver.planning import (
     build_archive_plan,
     select_eligible_streams,
     split_streams,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +88,16 @@ class PolicyRunResult:
 def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
     """Plan complete old streams independently for every configured source."""
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "policy_planning_started",
+        "planning policy sources",
+        policy=policy.name,
+        sources=len(policy.sources),
+    )
     source_plans: list[SourcePlan] = []
-    for source in policy.sources:
+    for source_index, source in enumerate(policy.sources, start=1):
         entries = discover_entries(source)
         streams = split_streams(entries, minimum_gap=policy.stream_gap)
         eligible = select_eligible_streams(
@@ -98,6 +110,19 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
             for stream in eligible
             if (plan := build_archive_plan(policy, source, stream)) is not None
         )
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "source_planning_completed",
+            "source planning completed",
+            policy=policy.name,
+            source=source,
+            source_progress=f"{source_index}/{len(policy.sources)}",
+            discovered_entries=len(entries),
+            streams=len(streams),
+            eligible_streams=len(eligible),
+            planned_archives=len(plans),
+        )
         source_plans.append(
             SourcePlan(
                 source_root=source,
@@ -107,19 +132,61 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
                 archive_plans=plans,
             )
         )
-    return PolicyPlan(policy_name=policy.name, source_plans=tuple(source_plans))
+    result = PolicyPlan(policy_name=policy.name, source_plans=tuple(source_plans))
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "policy_planning_completed",
+        "policy planning completed",
+        policy=policy.name,
+        discovered_entries=result.discovered_entries,
+        streams=result.streams,
+        eligible_streams=result.eligible_streams,
+        planned_archives=len(result.archive_plans),
+    )
+    return result
 
 
 def run_policy(policy: Policy, *, now: datetime) -> PolicyRunResult:
     """Recover pending cleanup, then execute every source-local eligible stream."""
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "policy_run_started",
+        "policy execution started",
+        policy=policy.name,
+        sources=len(policy.sources),
+        destination=policy.destination,
+    )
     recovered = tuple(
         archive
         for source in policy.sources
         for archive in recover_pending_archives(policy.destination, source, now=now)
     )
     plan = plan_policy(policy, now=now)
-    archives = tuple(execute_plan(item, now=now) for item in plan.archive_plans)
+    archives_list: list[ArchiveExecutionResult] = []
+    for index, item in enumerate(plan.archive_plans, start=1):
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "policy_archive_started",
+            "executing planned archive",
+            policy=policy.name,
+            archive=item.archive_name,
+            archive_progress=f"{index}/{len(plan.archive_plans)}",
+        )
+        archives_list.append(execute_plan(item, now=now))
+    archives = tuple(archives_list)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "policy_run_completed",
+        "policy execution completed",
+        policy=policy.name,
+        recovered_archives=len(recovered),
+        archives=len(archives),
+    )
     return PolicyRunResult(
         policy_name=policy.name,
         recovered_archives=recovered,
@@ -136,17 +203,49 @@ def verify_destination(destination: Path) -> tuple[ArchiveVerificationResult, ..
     internal staging directory are ignored.
     """
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "destination_verification_started",
+        "verifying archives under destination",
+        destination=destination,
+    )
     if not destination.exists():
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "destination_verification_completed",
+            "destination does not exist; no archives were verified",
+            destination=destination,
+            archives=0,
+        )
         return ()
     results: list[ArchiveVerificationResult] = []
-    for child in sorted(destination.iterdir()):
-        if (
-            child.name == ".stream-archiver-staging"
-            or child.is_symlink()
-            or not child.is_dir()
-        ):
-            continue
-        if not (child / MANIFEST_NAME).is_file():
-            continue
+    candidates = [
+        child
+        for child in sorted(destination.iterdir())
+        if child.name != ".stream-archiver-staging"
+        and not child.is_symlink()
+        and child.is_dir()
+        and (child / MANIFEST_NAME).is_file()
+    ]
+    for index, child in enumerate(candidates, start=1):
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_verification_started",
+            "verifying committed archive",
+            destination=destination,
+            archive=child,
+            archive_progress=f"{index}/{len(candidates)}",
+        )
         results.append(verify_archive(child))
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "destination_verification_completed",
+        "destination verification completed",
+        destination=destination,
+        archives=len(results),
+    )
     return tuple(results)

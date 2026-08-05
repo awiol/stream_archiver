@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from stream_archiver.errors import ExecutionError
+from stream_archiver.observability import log_event
+
+LOGGER = logging.getLogger(__name__)
 
 STATE_FORMAT_VERSION = 1
 
@@ -39,6 +43,13 @@ def load_state(path: Path) -> DueState:
     """Load state, treating a missing file as a never-run installation."""
 
     if not path.exists():
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "due_state_missing",
+            "no prior due state exists; policies are due",
+            path=path,
+        )
         return DueState({})
     try:
         with path.open("r", encoding="utf-8") as stream:
@@ -68,6 +79,14 @@ def load_state(path: Path) -> DueState:
                 f"timestamp for policy {name!r} in {path} must include an offset"
             )
         parsed[name] = moment.astimezone(timezone.utc)
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "due_state_loaded",
+        "due state loaded",
+        path=path,
+        policies=len(parsed),
+    )
     return DueState(parsed)
 
 
@@ -90,6 +109,14 @@ def save_state(path: Path, state: DueState) -> None:
         os.fsync(stream.fileno())
     os.replace(temporary, path)
     _fsync_directory(path.parent)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "due_state_saved",
+        "successful policy completion state persisted",
+        path=path,
+        policies=len(state.last_success),
+    )
 
 
 def _fsync_directory(path: Path) -> None:

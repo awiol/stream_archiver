@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from stream_archiver.config import CompressionCodec, Policy, SymlinkRule
 from stream_archiver.errors import PlanningError
+from stream_archiver.observability import log_event
 from stream_archiver.model import (
     ActionKind,
     ArchivePlan,
@@ -18,6 +20,8 @@ from stream_archiver.model import (
     PlannedAction,
     Stream,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 _RESERVED_ARCHIVE_PATHS = frozenset(
     {
@@ -46,7 +50,17 @@ def split_streams(
         if entry.mtime_ns - groups[-1][-1].mtime_ns >= gap_ns:
             groups.append([])
         groups[-1].append(entry)
-    return tuple(Stream(tuple(group)) for group in groups)
+    result = tuple(Stream(tuple(group)) for group in groups)
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "streams_split",
+        "entries grouped into streams",
+        entries=len(entries),
+        streams=len(result),
+        minimum_gap_seconds=int(minimum_gap.total_seconds()),
+    )
+    return result
 
 
 def select_eligible_streams(
@@ -58,7 +72,20 @@ def select_eligible_streams(
         raise PlanningError("minimum_age must be positive")
     now_utc = _require_aware_utc(now)
     cutoff_ns = _datetime_to_ns(now_utc) - _timedelta_to_ns(minimum_age)
-    return tuple(stream for stream in streams if stream.newest_mtime_ns <= cutoff_ns)
+    eligible = tuple(
+        stream for stream in streams if stream.newest_mtime_ns <= cutoff_ns
+    )
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "streams_selected",
+        "stream age eligibility evaluated",
+        streams=len(streams),
+        eligible=len(eligible),
+        minimum_age_seconds=int(minimum_age.total_seconds()),
+        cutoff_ns=cutoff_ns,
+    )
+    return eligible
 
 
 def build_archive_plan(
@@ -105,6 +132,17 @@ def build_archive_plan(
     archive_name = (
         f"{_format_timestamp(stream.oldest_mtime_ns)}--"
         f"{_format_timestamp(stream.newest_mtime_ns)}--{plan_id[:10]}"
+    )
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "archive_plan_built",
+        "deterministic archive plan created",
+        policy=policy.name,
+        source=source_root,
+        archive=archive_name,
+        actions=len(actions),
+        payload_actions=len(payload_actions),
     )
     return ArchivePlan(
         policy_name=policy.name,

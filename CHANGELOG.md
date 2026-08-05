@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 — 2026-08-04
+
+- Added structured text and JSON operational logging while keeping command JSON
+  output isolated on stdout.
+- Added INFO lifecycle and progress events for policy, source, archive, action,
+  byte, cleanup, recovery, and verification work; added DEBUG planning and
+  payload-verification detail.
+- Added actionable expected-failure logs, traceback-preserving unexpected-failure
+  logs, and explicit interruption handling.
+- Added `render-systemd`, which generates service, timer, and installation
+  instructions from the installed executable and validated policy paths.
+- Replaced editable hardcoded unit examples with generated deployment artifacts.
+- Added a stable-path guided installer that validates as the service user,
+  verifies the bundled wheel checksum, rejects protected configuration before
+  changing the system, and deliberately does not start work or enable the timer.
+- Exposed service name, schedule, timer accuracy, randomized delay, and service
+  log settings as installer options.
+- Added usability review, operations guidance, and behavioral tests for logging,
+  item/byte/percentage progress, JSON events, systemd generation, path escaping,
+  and overwrite protection.
+
 ## 0.2.0 — 2026-08-03
 
 - Changed the default uncompressed action from `copy` to `move`; movement uses

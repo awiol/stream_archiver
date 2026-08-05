@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 from pathlib import Path
 
 from stream_archiver.errors import ExecutionError
 from stream_archiver.model import Entry, EntryKind, FileIdentity
+from stream_archiver.observability import log_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 def discover_entries(source: Path) -> tuple[Entry, ...]:
@@ -18,10 +22,19 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
     selected entry is validated again during execution.
     """
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "discovery_started",
+        "scanning source without following symlinks",
+        source=source,
+    )
     if source.is_symlink() or not source.is_dir():
         raise ExecutionError(f"source is not a real directory: {source}")
 
     entries: list[Entry] = []
+    skipped_special = 0
+    disappeared = 0
     for root_text, directory_names, file_names in os.walk(
         source, followlinks=False, onerror=_raise_walk_error
     ):
@@ -37,6 +50,14 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
             try:
                 metadata = path.lstat()
             except FileNotFoundError:
+                disappeared += 1
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "discovery_entry_disappeared",
+                    "entry disappeared during discovery and was omitted",
+                    path=path,
+                )
                 continue
             except OSError as exc:
                 raise ExecutionError(
@@ -53,13 +74,46 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
             try:
                 metadata = path.lstat()
             except FileNotFoundError:
+                disappeared += 1
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "discovery_entry_disappeared",
+                    "entry disappeared during discovery and was omitted",
+                    path=path,
+                )
                 continue
             if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 entries.append(_entry_from_stat(source, path, metadata))
+            else:
+                skipped_special += 1
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "discovery_entry_ignored",
+                    "unsupported filesystem entry was not considered",
+                    path=path,
+                    mode=oct(metadata.st_mode),
+                )
 
-    return tuple(
+    ordered = tuple(
         sorted(entries, key=lambda item: (item.mtime_ns, item.relative_path.as_posix()))
     )
+    regular_files = sum(entry.kind is EntryKind.REGULAR for entry in ordered)
+    symlinks = len(ordered) - regular_files
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "discovery_completed",
+        "source discovery completed",
+        source=source,
+        entries=len(ordered),
+        regular_files=regular_files,
+        symlinks=symlinks,
+        disappeared=disappeared,
+        skipped_special=skipped_special,
+    )
+    return ordered
 
 
 def _entry_from_stat(source: Path, path: Path, metadata: os.stat_result) -> Entry:

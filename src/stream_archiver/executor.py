@@ -6,6 +6,7 @@ import bz2
 import gzip
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -13,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from stream_archiver.errors import ExecutionError, RecoveryError
 from stream_archiver.model import (
@@ -23,6 +24,9 @@ from stream_archiver.model import (
     EntryKind,
     PlannedAction,
 )
+from stream_archiver.observability import log_event
+
+LOGGER = logging.getLogger(__name__)
 
 COMPRESSION_LEVEL = 9
 MANIFEST_NAME = "MANIFEST.json"
@@ -71,6 +75,69 @@ class ArchiveVerificationResult:
     success_evidence: Path | None
 
 
+@dataclass(slots=True)
+class _FileProgress:
+    """Report bounded source-byte progress for one staged regular file."""
+
+    archive_name: str
+    source_path: Path
+    action_index: int
+    action_total: int
+    file_size: int
+    overall_before: int
+    overall_total: int
+    completed: int = 0
+    next_info_percent: int = 10
+    next_debug_percent: int = 1
+
+    def advance(self, amount: int) -> None:
+        """Record copied source bytes and emit bounded debug and info milestones."""
+
+        self.completed += amount
+        if self.file_size <= 0:
+            return
+        percent = min(100, self.completed * 100 // self.file_size)
+        overall = self.overall_before + self.completed
+        if percent >= self.next_debug_percent and percent < 100:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "archive_action_progress_debug",
+                "file staging progress",
+                archive=self.archive_name,
+                source=self.source_path,
+                action_progress=f"{self.action_index}/{self.action_total}",
+                file_bytes=f"{self.completed}/{self.file_size}",
+                overall_bytes=f"{overall}/{self.overall_total}",
+                percent=percent,
+                overall_percent=_percentage(overall, self.overall_total),
+            )
+            self.next_debug_percent = percent + 1
+        if percent >= self.next_info_percent and percent < 100:
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "archive_action_progress",
+                "file staging is making progress",
+                archive=self.archive_name,
+                source=self.source_path,
+                action_progress=f"{self.action_index}/{self.action_total}",
+                file_bytes=f"{self.completed}/{self.file_size}",
+                overall_bytes=f"{overall}/{self.overall_total}",
+                percent=percent,
+                overall_percent=_percentage(overall, self.overall_total),
+            )
+            self.next_info_percent = ((percent // 10) + 1) * 10
+
+
+def _percentage(completed: int, total: int) -> int:
+    """Return a bounded integer percentage for operational progress logs."""
+
+    if total <= 0:
+        return 100
+    return min(100, completed * 100 // total)
+
+
 def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
     """Safely move one source stream into a committed archive directory.
 
@@ -82,6 +149,17 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
     """
 
     now_utc = _require_aware_utc(now)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "archive_execution_started",
+        "archive transaction started",
+        policy=plan.policy_name,
+        source=plan.source_root,
+        destination=plan.destination_root,
+        archive=plan.archive_name,
+        actions=len(plan.actions),
+    )
     staging_directory: Path | None = None
     try:
         _ensure_real_directory(plan.destination_root)
@@ -97,7 +175,16 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
                 _recover_manifest(final_directory, manifest, completed_at=now_utc)
             elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
                 _ensure_success_evidence(final_directory, manifest)
-            return _result_from_manifest(final_directory, manifest)
+            result = _result_from_manifest(final_directory, manifest)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "archive_reused",
+                "existing matching archive was validated and reused",
+                archive=final_directory,
+                cleanup_complete=manifest.get("cleanup_complete"),
+            )
+            return result
 
         staging_root = plan.destination_root / ".stream-archiver-staging"
         _ensure_real_directory(staging_root)
@@ -107,13 +194,37 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             )
         )
 
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "archive_staging_created",
+            "destination-side staging directory created",
+            archive=plan.archive_name,
+            staging=staging_directory,
+        )
         manifest = _stage_plan(plan, staging_directory, now_utc)
         _write_manifest(staging_directory / MANIFEST_NAME, manifest)
         _fsync_directory(staging_directory)
         os.replace(staging_directory, final_directory)
         staging_directory = None
         _fsync_directory(plan.destination_root)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_committed",
+            "verified staging directory committed atomically",
+            archive=final_directory,
+            entries=len(manifest["entries"]),
+        )
 
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "source_cleanup_started",
+            "revalidating and removing committed source entries",
+            archive=final_directory,
+            source=plan.source_root,
+        )
         _validate_all_sources(manifest, plan.source_root)
         _remove_sources(manifest, plan.source_root)
         manifest["cleanup_complete"] = True
@@ -121,10 +232,28 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
         _write_manifest(final_directory / MANIFEST_NAME, manifest)
         _remove_empty_source_directories(plan.source_root)
         _ensure_success_evidence(final_directory, manifest)
-        return _result_from_manifest(final_directory, manifest)
+        result = _result_from_manifest(final_directory, manifest)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_execution_completed",
+            "archive transaction completed with verified success evidence",
+            archive=final_directory,
+            moved_files=result.moved_files,
+            success_evidence=result.success_evidence,
+        )
+        return result
     except (ExecutionError, RecoveryError):
         if staging_directory is not None and staging_directory.exists():
             shutil.rmtree(staging_directory, ignore_errors=True)
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            "archive_execution_failed",
+            "archive transaction failed; source cleanup was not advanced",
+            archive=plan.archive_name,
+            source=plan.source_root,
+        )
         raise
     except OSError as exc:
         if staging_directory is not None and staging_directory.exists():
@@ -143,8 +272,25 @@ def recover_pending_archives(
     """Resume cleanup and repair missing success evidence for one source root."""
 
     completed_at = _require_aware_utc(now or datetime.now(timezone.utc))
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "recovery_scan_started",
+        "scanning destination for pending cleanup",
+        destination=destination_root,
+        source=source_root,
+    )
     try:
         if not destination_root.exists():
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "recovery_scan_completed",
+                "destination does not exist; no recovery was required",
+                destination=destination_root,
+                source=source_root,
+                recovered=0,
+            )
             return ()
         if destination_root.is_symlink() or not destination_root.is_dir():
             raise RecoveryError(
@@ -167,10 +313,27 @@ def recover_pending_archives(
             if manifest.get("archive_name") != child.name:
                 raise RecoveryError(f"archive manifest name mismatch: {child}")
             if manifest.get("cleanup_complete") is not True:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "pending_cleanup_found",
+                    "committed archive requires source cleanup recovery",
+                    archive=child,
+                    source=source_root,
+                )
                 _recover_manifest(child, manifest, completed_at=completed_at)
                 recovered.append(child)
             elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
                 _ensure_success_evidence(child, manifest)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "recovery_scan_completed",
+            "pending cleanup scan completed",
+            destination=destination_root,
+            source=source_root,
+            recovered=len(recovered),
+        )
         return tuple(recovered)
     except RecoveryError:
         raise
@@ -189,6 +352,13 @@ def verify_archive(directory: Path) -> ArchiveVerificationResult:
     success marker.
     """
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "archive_verification_started",
+        "recomputing archive payload and evidence hashes",
+        archive=directory,
+    )
     if directory.is_symlink() or not directory.is_dir():
         raise RecoveryError(f"archive is not a real directory: {directory}")
     manifest_path = directory / MANIFEST_NAME
@@ -223,7 +393,7 @@ def verify_archive(directory: Path) -> ArchiveVerificationResult:
             if success.get(key) != value:
                 raise RecoveryError(f"success evidence {key} mismatch: {success_path}")
 
-    return ArchiveVerificationResult(
+    result = ArchiveVerificationResult(
         archive_directory=directory,
         payload_files=payload_files,
         preserved_symlinks=preserved_symlinks,
@@ -231,6 +401,16 @@ def verify_archive(directory: Path) -> ArchiveVerificationResult:
         checksums_sha256=checksums_digest,
         success_evidence=success_path,
     )
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "archive_verification_completed",
+        "archive payload and completion evidence verified",
+        archive=directory,
+        payload_files=payload_files,
+        preserved_symlinks=preserved_symlinks,
+    )
+    return result
 
 
 def _validate_plan_manifest_match(
@@ -259,7 +439,60 @@ def _ensure_real_directory(path: Path) -> None:
 
 
 def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, Any]:
-    records = [_stage_action(action, staging) for action in plan.actions]
+    total_bytes = sum(
+        action.source.identity.size
+        for action in plan.actions
+        if action.source.kind is EntryKind.REGULAR
+    )
+    completed_bytes = 0
+    records: list[dict[str, Any]] = []
+    for index, action in enumerate(plan.actions, start=1):
+        entry = action.source
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_action_started",
+            "staging archive action",
+            archive=plan.archive_name,
+            source=entry.relative_path,
+            operation=action.kind.value,
+            action_progress=f"{index}/{len(plan.actions)}",
+            source_bytes=(
+                entry.identity.size if entry.kind is EntryKind.REGULAR else 0
+            ),
+            overall_bytes=f"{completed_bytes}/{total_bytes}",
+            overall_percent=_percentage(completed_bytes, total_bytes),
+        )
+        progress = _FileProgress(
+            plan.archive_name,
+            entry.relative_path,
+            index,
+            len(plan.actions),
+            entry.identity.size,
+            completed_bytes,
+            total_bytes,
+        )
+        records.append(_stage_action(action, staging, progress=progress.advance))
+        if entry.kind is EntryKind.REGULAR:
+            completed_bytes += entry.identity.size
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_action_completed",
+            "archive action staged and verified",
+            archive=plan.archive_name,
+            source=entry.relative_path,
+            operation=action.kind.value,
+            action_progress=f"{index}/{len(plan.actions)}",
+            file_bytes=(
+                f"{entry.identity.size}/{entry.identity.size}"
+                if entry.kind is EntryKind.REGULAR
+                else "0/0"
+            ),
+            overall_bytes=f"{completed_bytes}/{total_bytes}",
+            percent=100,
+            overall_percent=_percentage(completed_bytes, total_bytes),
+        )
     checksums = _checksums_document(records)
     checksums_path = staging / CHECKSUMS_NAME
     _write_json(checksums_path, checksums)
@@ -283,7 +516,12 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
     }
 
 
-def _stage_action(action: PlannedAction, staging: Path) -> dict[str, Any]:
+def _stage_action(
+    action: PlannedAction,
+    staging: Path,
+    *,
+    progress: Callable[[int], None],
+) -> dict[str, Any]:
     entry = action.source
     compression = _compression_for_action(action.kind)
     record: dict[str, Any] = {
@@ -322,6 +560,7 @@ def _stage_action(action: PlannedAction, staging: Path) -> dict[str, Any]:
         entry,
         destination,
         compression=compression,
+        progress=progress,
     )
     record["source_sha256"] = source_digest
     record["archive_sha256"] = archive_digest
@@ -334,6 +573,7 @@ def _write_regular_payload(
     destination: Path,
     *,
     compression: str | None,
+    progress: Callable[[int], None],
 ) -> tuple[str, str, int]:
     source_hasher = hashlib.sha256()
     flags = os.O_RDONLY
@@ -360,11 +600,15 @@ def _write_regular_payload(
                         fileobj=raw_destination,
                         mtime=0,
                     ) as output:
-                        _copy_and_hash(source_stream, output, source_hasher)
+                        _copy_and_hash(source_stream, output, source_hasher, progress)
                 elif compression == "bz2":
-                    _copy_bz2_and_hash(source_stream, raw_destination, source_hasher)
+                    _copy_bz2_and_hash(
+                        source_stream, raw_destination, source_hasher, progress
+                    )
                 elif compression is None:
-                    _copy_and_hash(source_stream, raw_destination, source_hasher)
+                    _copy_and_hash(
+                        source_stream, raw_destination, source_hasher, progress
+                    )
                 else:  # pragma: no cover - planner and manifest validation constrain codecs.
                     raise ExecutionError(
                         f"unsupported compression codec: {compression}"
@@ -398,10 +642,12 @@ def _copy_bz2_and_hash(
     source: BinaryIO,
     destination: BinaryIO,
     hasher: Any,
+    progress: Callable[[int], None],
 ) -> None:
     compressor = bz2.BZ2Compressor(COMPRESSION_LEVEL)
     while chunk := source.read(1024 * 1024):
         hasher.update(chunk)
+        progress(len(chunk))
         compressed = compressor.compress(chunk)
         if compressed:
             destination.write(compressed)
@@ -410,9 +656,15 @@ def _copy_bz2_and_hash(
         destination.write(tail)
 
 
-def _copy_and_hash(source: BinaryIO, destination: BinaryIO, hasher: Any) -> None:
+def _copy_and_hash(
+    source: BinaryIO,
+    destination: BinaryIO,
+    hasher: Any,
+    progress: Callable[[int], None],
+) -> None:
     while chunk := source.read(1024 * 1024):
         hasher.update(chunk)
+        progress(len(chunk))
         destination.write(chunk)
 
 
@@ -466,8 +718,16 @@ def _remove_sources(
             record["source_path"],
         )
     )
-    for record in records:
+    for index, record in enumerate(records, start=1):
         path = source_root / Path(record["source_path"])
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "source_cleanup_progress",
+            "removing verified source entry",
+            source=path,
+            cleanup_progress=f"{index}/{len(records)}",
+        )
         if not os.path.lexists(path):
             continue
         _validate_source_record(path, record, error_type=error_type)
@@ -574,8 +834,19 @@ def _verify_archive_payloads(
 ) -> tuple[int, int]:
     payload_files = 0
     preserved_symlinks = 0
-    for record in manifest["entries"]:
+    records = manifest["entries"]
+    for index, record in enumerate(records, start=1):
         action = ActionKind(record["action"])
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "archive_payload_verification_progress",
+            "verifying archive payload entry",
+            archive=directory,
+            payload_progress=f"{index}/{len(records)}",
+            source=record["source_path"],
+            action=action.value,
+        )
         if action in {ActionKind.DROP_ALIAS_SYMLINK, ActionKind.SKIP_SYMLINK}:
             continue
         archive_path = directory / Path(record["archive_path"])
@@ -654,6 +925,16 @@ def _ensure_success_evidence(directory: Path, manifest: dict[str, Any]) -> None:
     _write_json(success_path, success)
     _fsync_directory(directory)
     verify_archive(directory)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "success_evidence_written",
+        "final success evidence written after cleanup and fresh verification",
+        archive=directory,
+        success=success_path,
+        manifest_sha256=manifest_digest,
+        checksums_sha256=checksums_digest,
+    )
 
 
 def _validate_success(success: Any, path: Path) -> None:

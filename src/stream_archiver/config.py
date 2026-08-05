@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ from typing import Any
 
 from stream_archiver.durations import parse_duration
 from stream_archiver.errors import ConfigurationError
+from stream_archiver.observability import log_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SymlinkRule(StrEnum):
@@ -216,6 +220,13 @@ def load_config(path: Path) -> AppConfig:
     ease upgrades from stream-archiver 0.1.0.
     """
 
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "configuration_load_started",
+        "reading TOML configuration",
+        path=path,
+    )
     try:
         with path.open("rb") as stream:
             raw = tomllib.load(stream)
@@ -240,7 +251,30 @@ def load_config(path: Path) -> AppConfig:
     policies = tuple(
         _parse_policy(item, index) for index, item in enumerate(raw_policies)
     )
-    return AppConfig(run_interval=run_interval, policies=policies)
+    config = AppConfig(run_interval=run_interval, policies=policies)
+    for policy in policies:
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "policy_loaded",
+            "validated archival policy",
+            policy=policy.name,
+            sources=[str(source) for source in policy.sources],
+            destination=policy.destination,
+            compression_rules=len(policy.compression_rules),
+            symlink_rule=policy.symlink_rule.value,
+        )
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "configuration_loaded",
+        "TOML configuration loaded successfully",
+        path=path,
+        schema_version=schema_version,
+        policy_count=len(policies),
+        run_interval_seconds=int(run_interval.total_seconds()),
+    )
+    return config
 
 
 def _validate_policy_roots(policies: tuple[Policy, ...]) -> None:

@@ -172,3 +172,42 @@ A failed policy is not marked successful.
   targets.
 - There is no producer lock, completion-marker protocol, signing key, restore
   command, or remote-storage integration.
+
+## Observability contract
+
+Command results are JSON on stdout. Operational logs are emitted on stderr so
+interactive use, shell pipelines, and systemd journal collection do not corrupt
+machine-readable results.
+
+Logs use named events with structured fields. Text and JSON renderings contain
+the same event names and context. `INFO` records lifecycle milestones and
+bounded progress; `DEBUG` records planning and verification detail. Progress is
+reported as:
+
+- policy, source, archive, action, cleanup, and verification item counters;
+- source bytes completed versus total archive-plan source bytes; and
+- per-file percentage milestones for files read in multiple chunks.
+
+Byte progress measures source bytes read. It does not claim destination bytes
+written because compression changes size. File contents are never logged.
+Unexpected exceptions retain a traceback and use a distinct exit status from
+expected configuration or operational failures.
+
+## Systemd generation contract
+
+Package-tracked systemd units are not deployment inputs. `render-systemd` loads
+a validated policy and generates:
+
+- an `ExecStart` bound to the selected installed executable and final policy
+  path;
+- `ConditionPathIsDirectory` and `ReadWritePaths` entries derived from every
+  configured source and destination;
+- a persistent randomized timer;
+- journal output configuration; and
+- resolved installation and manual-validation instructions.
+
+Generation refuses to overwrite existing output unless `--force` is explicit.
+The guided installer uses a stable version-independent virtual environment,
+copies a user-supplied policy, validates `check` and `plan` as the service user,
+and installs verified units. It intentionally does not start the mover or enable
+the timer.

@@ -2,91 +2,130 @@
 
 ## Pre-deployment checks
 
-1. Ensure the destination has free space for every complete eligible stream.
-   Safe movement temporarily retains both source and destination copies.
-2. Give the service account read, traversal, and deletion permissions on every
-   source and create/write permissions on each destination.
-3. Ensure source roots do not overlap one another or any destination.
-4. Equal destination roots are permitted; nested destination roots are not.
-5. Validate configuration and inspect the read-only plan:
+1. Create a user-owned policy file from `examples/config/policies.toml`.
+2. Ensure every source and destination directory already exists.
+3. Ensure the service account can traverse, read, and delete from sources and
+   can create files in destinations.
+4. Confirm destination free space. Safe movement temporarily retains both
+   source and destination copies.
+5. Validate and review the plan:
 
 ```bash
-/opt/stream-archiver-0.2.0/.venv/bin/stream-archiver \
-  --config /etc/stream-archiver/policies.toml check
-
-/opt/stream-archiver-0.2.0/.venv/bin/stream-archiver \
-  --config /etc/stream-archiver/policies.toml plan
+stream-archiver --config /path/to/policies.toml check
+stream-archiver --config /path/to/policies.toml plan
 ```
 
-6. Run and verify manually before enabling the timer:
+## Recommended installation
+
+Use the guided installer from an extracted release bundle:
 
 ```bash
+sudo ./tools/install-systemd.sh \
+  --config /absolute/path/to/policies.toml
+```
+
+The script checks configuration replacement before changing the system, verifies
+the bundled wheel checksum when `SHA256SUMS` is present, installs into
+`/opt/stream-archiver/venv`, installs the policy under `/etc/stream-archiver`,
+generates units from actual policy paths, verifies them, and reloads systemd. It
+does not start archival work or enable the timer. Use `--help` to set the service
+name, account, schedule, randomized delay, timer accuracy, or log format/level.
+
+For an existing installation, use `render-systemd` directly. The generated
+`INSTALL.md` is the authoritative deployment checklist for those exact paths.
+
+## First-run gate
+
+Run the read-only plan as the service account, then perform one manual service
+run:
+
+```bash
+sudo -u stream-archiver \
+  /opt/stream-archiver/venv/bin/stream-archiver \
+  --config /etc/stream-archiver/policies.toml plan
+
 sudo systemctl start stream-archiver.service
 sudo systemctl status stream-archiver.service
-journalctl -u stream-archiver.service --since today
-
-/opt/stream-archiver-0.2.0/.venv/bin/stream-archiver \
-  --config /etc/stream-archiver/policies.toml verify
+journalctl -u stream-archiver.service -n 200 --no-pager
 ```
+
+Only enable the timer after the service exits successfully and the resulting
+archives pass verification:
+
+```bash
+/opt/stream-archiver/venv/bin/stream-archiver \
+  --config /etc/stream-archiver/policies.toml verify
+sudo systemctl enable --now stream-archiver.timer
+```
+
+## Logs
+
+Normal scheduled operation uses `INFO` text logs in journald. Follow progress:
+
+```bash
+journalctl -u stream-archiver.service -f
+```
+
+Show warnings and errors:
+
+```bash
+journalctl -u stream-archiver.service -p warning..alert
+```
+
+Temporarily use debug logging by regenerating the unit with
+`--service-log-level DEBUG`, reviewing the diff, reinstalling it, and running
+`systemctl daemon-reload`. Debug logs include more paths, plan decisions, and
+verification milestones; they do not include file contents.
+
+Important progress fields include:
+
+- `policy_progress`, `source_progress`, `archive_progress`;
+- `action_progress`, `cleanup_progress`, `payload_progress`;
+- `file_bytes`, `overall_bytes`, `percent`, and `overall_percent`; and
+- `archive`, `source`, `operation`, and evidence hashes.
 
 ## Completion criteria
 
-A version-2 archive is complete only when all conditions hold:
+A current archive is complete only when:
 
 - `MANIFEST.json` has `cleanup_complete: true`;
-- every regular payload matches its recorded archive SHA-256;
-- every compressed payload decompresses to its source SHA-256;
-- `SHA256SUMS.json` matches the manifest and its recorded hash; and
-- `SUCCESS.json` has status `completed` and references the current final
-  manifest and checksum-index hashes.
+- every regular payload matches its archived SHA-256;
+- compressed payloads decompress to their source SHA-256;
+- `SHA256SUMS.json` matches the manifest and recorded hash; and
+- `SUCCESS.json` references the current final manifest and checksum-index
+  hashes.
 
 The `verify` command checks these conditions without changing files.
 
 ## Diagnosing failures
 
-Exit status 2 means configuration, planning, locking, execution, recovery, or
-verification failed. Common causes include:
+Exit status 2 indicates an expected configuration, planning, locking,
+execution, recovery, or verification failure. The final `operation_failed` log
+includes a corrective action. Exit status 1 indicates an unexpected internal
+failure and retains a traceback for defect reporting. Exit status 130 indicates
+operator interruption.
 
-- source path missing or inaccessible;
-- source roots overlap;
-- a source overlaps a destination;
-- a generated `.gz` or `.bz2` name collides with another payload path;
-- a payload collides with a reserved evidence filename;
-- source identity or content changed between planning and cleanup;
-- a pending cleanup contains a changed source path;
-- a payload, checksum index, manifest, or success marker was corrupted;
-- insufficient destination space or permissions; or
-- another invocation owns the process lock.
+A committed archive with `cleanup_complete: false` is incomplete. Correct the
+reported source or permission problem and rerun the policy. Recovery validates
+remaining source identities before deletion.
 
-A committed archive with `cleanup_complete: false` is not complete and should
-not have a valid `SUCCESS.json`. Correct the source or permission problem and
-run the policy again. Recovery validates remaining sources before deletion.
+Do not edit a manifest to force deletion after a source was intentionally
+changed. Preserve both copies and resolve the conflict manually.
 
-If the source was intentionally replaced after a pending commit, do not edit the
-manifest to force deletion. Inspect the committed archive, preserve both copies,
-and resolve the conflict manually.
+## Configuration or package upgrades
 
-## Shared destination operation
+1. Install the new wheel into the stable virtual environment.
+2. Run `check` and `plan`.
+3. Regenerate systemd files with `--force`.
+4. Review the generated-unit diff.
+5. Install both units and run `systemctl daemon-reload`.
+6. Perform a manual service run and verification before resuming the timer.
 
-Several policies can share one destination. Archive directory hashes include
-policy and source ownership, so equal time ranges do not collide. Recovery scans
-that destination and acts only on manifests for the current source root.
-Verification is destination-scoped and therefore checks all archives in a
-selected shared destination.
-
-The systemd service must list every source and destination under
-`ReadWritePaths`, including all sources in a policy's `sources` array.
+Regeneration is required when source paths, destinations, policy path,
+executable path, service identity, schedule, or service log options change.
 
 ## Restore
 
-The tool does not implement automatic restore. A completed manifest records
-original relative paths, modes, mtimes, actions, link text, hashes, and codec.
-
-- Restore `move` payloads directly.
-- Decompress `.gz` and `.bz2` payloads to the recorded source path without the
-  appended archive suffix.
-- Recreate preserved symlinks from `link_target`.
-- Verify hashes before placing restored files into use.
-
-Test restore procedures on non-production data. This mover is not a substitute
-for an independent backup with tested recovery objectives.
+Automatic restore is outside scope. The manifest records original relative
+paths, modes, mtimes, actions, link text, hashes, and codec. Verify hashes before
+placing restored files into use. Test restore procedures on non-production data.
