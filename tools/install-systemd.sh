@@ -44,6 +44,7 @@ ACCURACY=1h
 SERVICE_LOG_LEVEL=INFO
 SERVICE_LOG_FORMAT=text
 REPLACE_CONFIG=0
+PYTHON_VERSION=3.14
 
 while (($#)); do
     case "$1" in
@@ -94,6 +95,10 @@ while (($#)); do
         --replace-config)
             REPLACE_CONFIG=1
             shift
+            ;;
+        --python-version)
+            PYTHON_VERSION=${2:?--python-version requires a version}
+            shift 2
             ;;
         --help|-h)
             usage
@@ -200,8 +205,34 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 
 install -d -m 0755 -o root -g root "$INSTALL_ROOT"
-python3 -m venv "$INSTALL_ROOT/venv"
-"$INSTALL_ROOT/venv/bin/pip" install --no-index --no-deps --force-reinstall "$WHEEL"
+
+UV_BIN=${UV_BIN:-$(command -v uv || true)}
+PYTHON_VERSION=${PYTHON_VERSION:-3.11}
+
+if [[ -z $UV_BIN || ! -x $UV_BIN ]]; then
+    printf 'uv was not found. Set UV_BIN to the absolute path of uv.\n' >&2
+    exit 2
+fi
+
+# Keep uv-managed Python outside /root so the systemd service account can
+# execute the interpreter after installation.
+UV_PYTHON_INSTALL_DIR="$INSTALL_ROOT/python" \
+    "$UV_BIN" python install "$PYTHON_VERSION"
+
+UV_PYTHON_INSTALL_DIR="$INSTALL_ROOT/python" \
+    "$UV_BIN" venv \
+        --clear \
+        --python "$PYTHON_VERSION" \
+        "$INSTALL_ROOT/venv"
+
+"$UV_BIN" pip install \
+    --python "$INSTALL_ROOT/venv/bin/python" \
+    --no-index \
+    --no-deps \
+    --force-reinstall \
+    "$WHEEL"
+
+chmod -R a+rX "$INSTALL_ROOT/python"
 
 install -d -m 0750 -o root -g "$SERVICE_GROUP" "$(dirname -- "$CONFIG_DESTINATION")"
 install -m 0640 -o root -g "$SERVICE_GROUP" "$CONFIG_SOURCE" "$CONFIG_DESTINATION"
