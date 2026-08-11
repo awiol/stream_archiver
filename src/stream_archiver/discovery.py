@@ -9,7 +9,7 @@ from pathlib import Path
 
 from stream_archiver.errors import ExecutionError
 from stream_archiver.model import Entry, EntryKind, FileIdentity
-from stream_archiver.observability import log_event
+from stream_archiver.observability import log_event, quote_path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,8 +29,7 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
         "scanning source without following symlinks",
         source=source,
     )
-    if source.is_symlink() or not source.is_dir():
-        raise ExecutionError(f"source is not a real directory: {source}")
+    _validate_source_directory(source)
 
     entries: list[Entry] = []
     skipped_special = 0
@@ -114,6 +113,80 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
         skipped_special=skipped_special,
     )
     return ordered
+
+
+def _validate_source_directory(source: Path) -> None:
+    """Reject missing, hidden, symlinked, and non-directory source roots.
+
+    ``Path.is_dir()`` collapses several operational failures into ``False``.
+    Explicit ``lstat`` handling keeps scheduled-service diagnostics actionable,
+    especially when a systemd filesystem sandbox hides an otherwise valid path.
+    """
+
+    try:
+        metadata = source.lstat()
+    except FileNotFoundError as exc:
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            "source_unavailable",
+            "configured source directory does not exist",
+            source=source,
+            reason="missing",
+            action="create or correct the configured source path",
+        )
+        raise ExecutionError(
+            f"source directory does not exist: {quote_path(source)}"
+        ) from exc
+    except PermissionError as exc:
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            "source_unavailable",
+            "configured source directory is not accessible",
+            source=source,
+            reason="permission-denied-or-sandboxed",
+            action=(
+                "check directory traversal permissions and the generated systemd "
+                "filesystem sandbox"
+            ),
+        )
+        raise ExecutionError(
+            f"cannot access source directory: {quote_path(source)}: {exc}"
+        ) from exc
+    except OSError as exc:
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            "source_unavailable",
+            "configured source directory could not be inspected",
+            source=source,
+            reason="stat-failed",
+            errno=exc.errno,
+        )
+        raise ExecutionError(
+            f"cannot inspect source directory: {quote_path(source)}: {exc}"
+        ) from exc
+
+    if stat.S_ISLNK(metadata.st_mode):
+        reason = "symlink"
+        message = "configured source root must not be a symbolic link"
+    elif not stat.S_ISDIR(metadata.st_mode):
+        reason = "not-directory"
+        message = "configured source root is not a directory"
+    else:
+        return
+
+    log_event(
+        LOGGER,
+        logging.ERROR,
+        "source_unavailable",
+        message,
+        source=source,
+        reason=reason,
+        action="configure a real directory as the source root",
+    )
+    raise ExecutionError(f"{message}: {quote_path(source)}")
 
 
 def _entry_from_stat(source: Path, path: Path, metadata: os.stat_result) -> Entry:

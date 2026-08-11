@@ -186,6 +186,9 @@ def _service_unit(
     permissions = "\n".join(
         f"ReadWritePaths={_quote_unit_argument(str(path))}" for path in writable_paths
     )
+    protect_home = (
+        "false" if _requires_home_access([config_path, *writable_paths]) else "true"
+    )
     return f"""[Unit]
 Description=Archive complete old filesystem streams
 ConditionPathExists={_escape_unit_path(config_path)}
@@ -204,7 +207,7 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome={protect_home}
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -218,6 +221,24 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier={service_name}
 """
+
+
+def _requires_home_access(paths: list[Path]) -> bool:
+    """Return whether configured policy paths need systemd home-tree access.
+
+    ``ProtectHome=true`` hides ``/home``, ``/root``, and ``/run/user`` inside
+    the service mount namespace.  Disable that sandbox only when a configured
+    source or destination is located below one of those trees; the generated
+    ``ReadWritePaths`` list still limits writable locations under
+    ``ProtectSystem=strict``.
+    """
+
+    protected_roots = (Path("/home"), Path("/root"), Path("/run/user"))
+    return any(
+        path == root or root in path.parents
+        for path in paths
+        for root in protected_roots
+    )
 
 
 def _escape_unit_path(path: Path) -> str:

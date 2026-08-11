@@ -8,12 +8,14 @@
    can create files in destinations.
 4. Confirm destination free space. Safe movement temporarily retains both
    source and destination copies.
-5. Validate and review the plan:
+5. Review the read-only plan. `plan` also loads and validates the policy:
 
 ```bash
-stream-archiver --config /path/to/policies.toml check
 stream-archiver --config /path/to/policies.toml plan
 ```
+
+After installation to the default `/etc/stream-archiver/policies.toml`, the
+`--config` option can be omitted for manual commands.
 
 ## Recommended installation
 
@@ -41,8 +43,7 @@ run:
 
 ```bash
 sudo -u stream-archiver \
-  /opt/stream-archiver/venv/bin/stream-archiver \
-  --config /etc/stream-archiver/policies.toml plan
+  /opt/stream-archiver/venv/bin/stream-archiver plan
 
 sudo systemctl start stream-archiver.service
 sudo systemctl status stream-archiver.service
@@ -53,8 +54,7 @@ Only enable the timer after the service exits successfully and the resulting
 archives pass verification:
 
 ```bash
-/opt/stream-archiver/venv/bin/stream-archiver \
-  --config /etc/stream-archiver/policies.toml verify
+/opt/stream-archiver/venv/bin/stream-archiver verify
 sudo systemctl enable --now stream-archiver.timer
 ```
 
@@ -115,7 +115,7 @@ changed. Preserve both copies and resolve the conflict manually.
 ## Configuration or package upgrades
 
 1. Install the new wheel into the stable virtual environment.
-2. Run `check` and `plan`.
+2. Run `plan` (which also validates configuration).
 3. Regenerate systemd files with `--force`.
 4. Review the generated-unit diff.
 5. Install both units and run `systemctl daemon-reload`.
@@ -129,3 +129,27 @@ executable path, service identity, schedule, or service log options change.
 Automatic restore is outside scope. The manifest records original relative
 paths, modes, mtimes, actions, link text, hashes, and codec. Verify hashes before
 placing restored files into use. Test restore procedures on non-production data.
+
+## 0.3.1 command-line conveniences
+
+For the standard system installation, the following are sufficient:
+
+```bash
+stream-archiver plan
+stream-archiver run
+```
+
+The CLI automatically uses `/etc/stream-archiver/policies.toml` when no higher
+priority policy path is configured. For a per-user policy, set
+`STREAM_ARCHIVER_CONFIG` once or place the file at
+`$XDG_CONFIG_HOME/stream-archiver/policies.toml` (defaulting to
+`~/.config/stream-archiver/policies.toml`).
+
+`plan` includes configuration validation, so `check` does not need to precede
+it. A successful `run` already verifies the staged bytes and final completion
+evidence; use `verify` later when an independent integrity audit is wanted.
+
+If a service succeeds under `sudo -u stream-archiver ... plan` but reports that
+a source is inaccessible when started by systemd, regenerate and reinstall the
+unit with 0.3.1 or later. Generated units no longer hide required paths under
+`/home`, `/root`, or `/run/user` with `ProtectHome=true`.

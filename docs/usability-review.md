@@ -72,3 +72,43 @@ Named structured events provide:
   virtual environment remain an administrator-managed deployment.
 - Log volume at `DEBUG` can be significant for large archives. It is intended
   for diagnosis, not permanent default operation.
+
+## 0.3.1 follow-up review
+
+### Path diagnostics were visually ambiguous
+
+Text logs previously emitted structured fields without quoting simple strings,
+and final exception text embedded paths directly in free-form messages. A path
+containing spaces could therefore be difficult to distinguish from neighboring
+fields. Version 0.3.1 quotes every text-log string field and emits source-root
+failures with separate `source`, `reason`, and corrective-action fields.
+
+### Service-user validation did not reproduce the systemd sandbox
+
+The installer ran `plan` as the service account before installation, but that
+check occurred outside the generated service mount namespace. A policy under
+`/home`, `/root`, or `/run/user` could pass that check and later be hidden by
+`ProtectHome=true` when systemd started the service. Unit generation now keeps
+`ProtectHome=true` only when none of the required configuration/source/
+destination paths are in those trees. Otherwise it uses `ProtectHome=false`
+while retaining `ProtectSystem=strict` and the generated writable-path allow
+list.
+
+### Routine CLI invocation repeated deployment details
+
+The documented workflow repeated a full `--config` path and an explicit manual
+lock path for nearly every command. The CLI now resolves configuration from an
+explicit option, `STREAM_ARCHIVER_CONFIG`, a standard per-user XDG location, or
+the installed `/etc/stream-archiver/policies.toml`. Manual state and locking use
+the XDG state directory by default. The review workflow is also shorter:
+`plan` already validates configuration, and a successful `run` already performs
+transactional payload/evidence verification.
+
+### Compression output collisions were safe but unnecessarily fatal
+
+A valid source can contain both `data.json` and `data.json.gz`. Compressing the
+first file prefers the same archive path used by the second. The previous
+planner rejected the complete stream. Version 0.3.1 preserves fixed source paths
+and deterministically disambiguates only generated gzip/bzip2 paths, with the
+chosen path recorded in the plan and manifest. Fixed-path and reserved-evidence
+collisions remain hard failures.

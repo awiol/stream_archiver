@@ -1,4 +1,4 @@
-# stream-archiver 0.3.0
+# stream-archiver 0.3.1
 
 `stream-archiver` safely moves complete, old filesystem streams into
 period-named archive directories. It is intended for unattended Ubuntu systems
@@ -36,7 +36,11 @@ cross-filesystem implementation is:
 6. remove the original; and
 7. write completion evidence after cleanup and fresh verification.
 
-Compression supports gzip and bzip2. Both always use level 9.
+Compression supports gzip and bzip2. Both always use level 9. If a generated
+compressed name conflicts with an existing payload path, for example
+`data.json -> data.json.gz` when `data.json.gz` already exists, the fixed source
+path is preserved and only the generated compressed path receives a
+deterministic disambiguation suffix recorded in the manifest.
 
 ## Requirements
 
@@ -53,7 +57,7 @@ The bundle contains a wheel and does not need network access:
 python3 -m venv ~/.local/share/stream-archiver/venv
 ~/.local/share/stream-archiver/venv/bin/pip install \
   --no-index --no-deps \
-  ./dist/stream_archiver-0.3.0-py3-none-any.whl
+  ./dist/stream_archiver-0.3.1-py3-none-any.whl
 ```
 
 For development and tests:
@@ -112,29 +116,48 @@ weeks (`w`). Calendar months are intentionally unsupported.
 
 ## Validate, preview, run, and verify
 
+For a system installation, `/etc/stream-archiver/policies.toml` is discovered
+automatically. For a user-managed policy, set it once in the shell environment:
+
 ```bash
-stream-archiver --config ~/stream-archiver-policies.toml check
-stream-archiver --config ~/stream-archiver-policies.toml plan
+export STREAM_ARCHIVER_CONFIG=~/stream-archiver-policies.toml
 ```
 
-`plan` is read-only. Review it before the first run.
+The resolution order is: explicit `--config`, `STREAM_ARCHIVER_CONFIG`,
+`$XDG_CONFIG_HOME/stream-archiver/policies.toml` (or
+`~/.config/stream-archiver/policies.toml`), then
+`/etc/stream-archiver/policies.toml`.
+
+A normal first review needs only:
+
+```bash
+stream-archiver plan
+```
+
+`plan` loads and validates the configuration before scanning sources, so a
+separate `check` is not required before it. `check` remains useful when only
+configuration syntax and policy validation should run.
 
 Run immediately:
 
 ```bash
-stream-archiver \
-  --config ~/stream-archiver-policies.toml \
-  run \
-  --lock-file ~/.local/state/stream-archiver/execution.lock
+stream-archiver run
 ```
 
-Verify every committed archive under the selected destination roots:
+Manual runs place their default lock under `$XDG_STATE_HOME/stream-archiver` or
+`~/.local/state/stream-archiver`; `--lock-file` remains available for explicit
+overrides.
+
+Verify every committed archive under the selected destination roots when an
+independent audit is wanted:
 
 ```bash
-stream-archiver --config ~/stream-archiver-policies.toml verify
+stream-archiver verify
 ```
 
-Use `--policy NAME` before the subcommand to select policies.
+A successful `run` already verifies staged payload bytes and completion evidence
+as part of the safe-move transaction. Use `--policy NAME` before the subcommand
+to select policies.
 
 ## Logging and progress
 
@@ -161,8 +184,10 @@ At `INFO`, unattended runs report:
 - failures with a corrective action.
 
 `DEBUG` adds discovery, stream-selection, plan, lock, per-chunk milestone, and
-payload-verification details. Paths and hashes are logged, but file contents are
-not.
+payload-verification details. Text-log string fields are always quoted, so a
+path containing spaces cannot visually run into the following field. Source
+access failures also report a structured `source` and `reason`. Paths and hashes
+are logged, but file contents are not.
 
 For systemd:
 
@@ -240,7 +265,10 @@ The output contains:
 
 Regenerate with `--force` after executable, policy-path, source, destination,
 identity, schedule, or service-log changes. Review the diff rather than editing
-the generated unit.
+the generated unit. The generator keeps `ProtectHome=true` when possible, but
+disables that sandbox when the policy or configuration must access `/home`,
+`/root`, or `/run/user`; `ProtectSystem=strict` and generated `ReadWritePaths`
+remain in effect.
 
 ## Completion evidence
 

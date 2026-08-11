@@ -116,3 +116,40 @@ def test_guided_installer_is_syntax_valid_and_version_independent() -> None:
     assert "does not start the mover or enable the timer" in text
     assert text.index("Refusing to replace") < text.index("python3 -m venv")
     assert "SHA256SUMS does not contain the bundled wheel" in text
+
+
+def test_rendered_service_allows_configured_paths_under_home(tmp_path: Path) -> None:
+    """ProtectHome cannot hide a source that the generated policy must access."""
+
+    source = Path("/home/example/archive source")
+    destination = Path("/srv/archive/stream-archiver")
+    config = AppConfig(
+        run_interval=timedelta(days=30),
+        policies=(
+            Policy(
+                name="home-reports",
+                sources=(source,),
+                destination=destination,
+                minimum_age=timedelta(days=30),
+                stream_gap=timedelta(hours=8),
+                symlink_rule=SymlinkRule.IGNORE,
+                compression_rules=(),
+            ),
+        ),
+    )
+    config_path = tmp_path / "policies.toml"
+    config_path.write_text("schema_version = 2\n", encoding="utf-8")
+    executable = tmp_path / "stream-archiver"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    result = render_systemd_bundle(
+        config,
+        config_path=config_path,
+        executable=executable,
+        output_directory=tmp_path / "generated",
+    )
+
+    service = result.service_path.read_text(encoding="utf-8")
+    assert "ProtectHome=false" in service
+    assert f'ReadWritePaths="{source}"' in service

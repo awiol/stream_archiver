@@ -100,3 +100,61 @@ def test_cli_failure_log_is_actionable_and_stdout_remains_empty(
     assert captured.out == ""
     assert events[-1]["event"] == "operation_failed"
     assert "action" in events[-1]
+
+
+def test_text_logging_quotes_paths_and_other_string_fields() -> None:
+    """Whitespace in filesystem paths cannot visually merge with adjacent fields."""
+
+    output = io.StringIO()
+    configure_logging(level="INFO", format_name="text", stream=output)
+
+    import logging
+
+    logger = logging.getLogger("stream_archiver.test")
+    log_event(
+        logger,
+        logging.INFO,
+        "path_example",
+        "testing path rendering",
+        source=Path("/tmp/source with spaces/report.json"),
+        operation="plan",
+    )
+
+    rendered = output.getvalue()
+    assert 'source="/tmp/source with spaces/report.json"' in rendered
+    assert 'operation="plan"' in rendered
+
+
+def test_missing_source_log_has_structured_path_and_reason(
+    tmp_path: Path, capsys: object
+) -> None:
+    """A missing source is diagnosed separately from generic non-directory failure."""
+
+    from stream_archiver.cli import main
+
+    source = tmp_path / "missing source"
+    destination = tmp_path / "archive"
+    config = tmp_path / "policies.toml"
+    config.write_text(
+        (
+            "schema_version = 2\n"
+            "[[policies]]\n"
+            'name = "reports"\n'
+            f'sources = ["{source}"]\n'
+            f'destination = "{destination}"\n'
+            'minimum_age = "30d"\n'
+            'stream_gap = "8h"\n'
+            'symlink_rule = "ignore"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    status = main(["--config", str(config), "--log-format", "json", "plan"])
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    events = [json.loads(line) for line in captured.err.splitlines()]
+
+    assert status == 2
+    unavailable = next(event for event in events if event["event"] == "source_unavailable")
+    assert unavailable["source"] == str(source)
+    assert unavailable["reason"] == "missing"
+    assert events[-1]["detail"].startswith("source directory does not exist:")

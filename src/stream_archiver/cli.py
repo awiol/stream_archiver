@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,20 +35,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     log_level = "DEBUG" if arguments.verbose else arguments.log_level
     configure_logging(level=log_level, format_name=arguments.log_format)
-    log_event(
-        LOGGER,
-        logging.DEBUG,
-        "cli_started",
-        "command-line invocation started",
-        command=arguments.command,
-        config=arguments.config,
-        selected_policies=arguments.policy,
-    )
 
     try:
-        config = load_config(arguments.config)
+        config_path = _resolve_config_path(arguments.config)
+        arguments.config = config_path
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "cli_started",
+            "command-line invocation started",
+            command=arguments.command,
+            config=config_path,
+            selected_policies=arguments.policy,
+        )
+        config = load_config(config_path)
         policies = _select_policies(config, arguments.policy)
         now = _parse_now(arguments.now)
+        if arguments.command == "run-if-due" and arguments.state is None:
+            arguments.state = _default_state_file()
         log_event(
             LOGGER,
             logging.INFO,
@@ -162,8 +167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             LOGGER,
             logging.ERROR,
             "operation_failed",
-            str(exc),
+            "operation failed",
             command=arguments.command,
+            error_type=type(exc).__name__,
+            detail=str(exc),
             action="inspect preceding logs, correct the reported condition, and rerun",
         )
         return 2
@@ -184,7 +191,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Safely move complete old filesystem streams using declarative policies.",
     )
     parser.add_argument(
-        "--config", type=Path, required=True, help="TOML configuration path"
+        "--config",
+        type=Path,
+        help=(
+            "TOML configuration path; otherwise use STREAM_ARCHIVER_CONFIG or "
+            "a standard policies.toml location"
+        ),
     )
     parser.add_argument(
         "--policy",
@@ -228,7 +240,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "run-if-due",
         help="run policies whose configured interval has elapsed",
     )
-    due.add_argument("--state", type=Path, required=True)
+    due.add_argument("--state", type=Path)
     due.add_argument("--lock-file", type=Path)
 
     systemd = subparsers.add_parser(
@@ -302,6 +314,40 @@ def _run_if_due(
     return 0
 
 
+def _resolve_config_path(explicit: Path | None) -> Path:
+    """Resolve the policy file without requiring a repeated full CLI path.
+
+    Resolution order is explicit ``--config``, ``STREAM_ARCHIVER_CONFIG``, the
+    per-user XDG location, and the system installation location.  Only
+    existing regular files are selected implicitly, so an unrelated missing
+    candidate cannot shadow a valid lower-priority configuration.
+    """
+
+    if explicit is not None:
+        return explicit.expanduser().resolve(strict=False)
+
+    environment_value = os.environ.get("STREAM_ARCHIVER_CONFIG")
+    if environment_value:
+        return Path(environment_value).expanduser().resolve(strict=False)
+
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    user_candidate = (
+        Path(xdg_home).expanduser() / "stream-archiver" / "policies.toml"
+        if xdg_home
+        else Path.home() / ".config" / "stream-archiver" / "policies.toml"
+    )
+    system_candidate = Path("/etc/stream-archiver/policies.toml")
+    for candidate in (user_candidate, system_candidate):
+        if candidate.is_file():
+            return candidate.resolve(strict=False)
+
+    raise ConfigurationError(
+        "no policy file was specified and no default configuration exists; "
+        "pass --config, set STREAM_ARCHIVER_CONFIG, or create "
+        f"{user_candidate} or {system_candidate}"
+    )
+
+
 def _select_policies(config: AppConfig, selected: list[str]) -> tuple[Policy, ...]:
     if not selected:
         return config.policies
@@ -325,10 +371,25 @@ def _parse_now(value: str | None) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _default_state_file() -> Path:
+    """Return a writable per-user state location for manual invocations."""
+
+    explicit = os.environ.get("STREAM_ARCHIVER_STATE")
+    if explicit:
+        return Path(explicit).expanduser().resolve(strict=False)
+    xdg_state_home = os.environ.get("XDG_STATE_HOME")
+    root = (
+        Path(xdg_state_home).expanduser()
+        if xdg_state_home
+        else Path.home() / ".local" / "state"
+    )
+    return root / "stream-archiver" / "state.json"
+
+
 def _default_lock_file(arguments: argparse.Namespace) -> Path:
     if arguments.command == "run-if-due":
         return arguments.state.with_name(arguments.state.name + ".lock")
-    return arguments.config.with_name(arguments.config.name + ".lock")
+    return _default_state_file().with_name("execution.lock")
 
 
 def _config_summary(config: AppConfig) -> dict[str, object]:

@@ -102,3 +102,62 @@ def test_verify_command_reports_hash_evidence(tmp_path: Path, capsys: object) ->
     assert output[0]["payload_files"] == 1
     assert len(output[0]["manifest_sha256"]) == 64
     assert output[0]["success_evidence"].endswith("SUCCESS.json")
+
+
+def test_config_can_be_selected_from_environment(
+    tmp_path: Path, capsys: object, monkeypatch: object
+) -> None:
+    """Routine CLI use can avoid repeating a full policy-file path."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    config = _write_config(tmp_path, source, destination)
+    monkeypatch.setenv("STREAM_ARCHIVER_CONFIG", str(config))  # type: ignore[attr-defined]
+
+    status = main(["check"])
+    output = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+
+    assert status == 0
+    assert output["policies"][0]["name"] == "reports"
+
+
+def test_explicit_config_overrides_environment(
+    tmp_path: Path, capsys: object, monkeypatch: object
+) -> None:
+    """An explicit policy file always wins over the convenience environment setting."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    config = _write_config(tmp_path, source, destination)
+    monkeypatch.setenv(  # type: ignore[attr-defined]
+        "STREAM_ARCHIVER_CONFIG", str(tmp_path / "missing.toml")
+    )
+
+    status = main(["--config", str(config), "check"])
+    output = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+
+    assert status == 0
+    assert output["policies"][0]["name"] == "reports"
+
+
+def test_manual_run_uses_xdg_state_directory_for_default_lock(
+    tmp_path: Path, capsys: object, monkeypatch: object
+) -> None:
+    """A default system config does not imply an unwritable lock beside that file."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    state_home = tmp_path / "state home"
+    write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    config = _write_config(tmp_path, source, destination)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))  # type: ignore[attr-defined]
+
+    status = main(["--config", str(config), "--now", NOW.isoformat(), "run"])
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    assert status == 0
+    assert (state_home / "stream-archiver" / "execution.lock").is_file()

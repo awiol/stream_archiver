@@ -89,8 +89,12 @@ For each compressed file, execution records:
 Execution decompresses the staged payload and requires its hash to equal the
 source hash before commit.
 
-Plans reject generated path collisions and the reserved root-level evidence
-names `MANIFEST.json`, `SHA256SUMS.json`, and `SUCCESS.json`.
+Fixed payload paths must remain collision-free, including the reserved root-level
+evidence names `MANIFEST.json`, `SHA256SUMS.json`, and `SUCCESS.json`. Generated
+gzip/bzip2 names are different: if the preferred compressed path collides with a
+fixed payload or required directory, the planner keeps all fixed source paths
+unchanged and deterministically disambiguates only the generated compressed
+path. The selected path becomes part of the plan identifier and manifest.
 
 ## Safe move transaction
 
@@ -150,6 +154,18 @@ signed provenance against a writer who controls the destination.
 Changed source identity or content blocks recovery and is never deleted
 automatically.
 
+## CLI configuration and local state
+
+Routine interactive commands do not require a repeated absolute policy path.
+Configuration resolution is explicit `--config`, `STREAM_ARCHIVER_CONFIG`, the
+XDG per-user policy path, then `/etc/stream-archiver/policies.toml`. The systemd
+unit still embeds an explicit resolved path so scheduled behavior is independent
+of service environment variables.
+
+Manual `run` locking and default `run-if-due` state use the XDG user state
+directory rather than the configuration directory. Explicit `--lock-file` and
+`--state` values remain authoritative.
+
 ## Scheduling
 
 The provided timer checks daily with a randomized delay. `run-if-due` stores one
@@ -189,7 +205,10 @@ reported as:
 - per-file percentage milestones for files read in multiple chunks.
 
 Byte progress measures source bytes read. It does not claim destination bytes
-written because compression changes size. File contents are never logged.
+written because compression changes size. Text-format string fields are always
+JSON-quoted; paths are carried as structured fields where possible. Source-root
+validation emits a dedicated event that distinguishes missing, inaccessible or
+sandboxed, symlinked, and non-directory roots. File contents are never logged.
 Unexpected exceptions retain a traceback and use a distinct exit status from
 expected configuration or operational failures.
 
@@ -207,6 +226,12 @@ a validated policy and generates:
 - resolved installation and manual-validation instructions.
 
 Generation refuses to overwrite existing output unless `--force` is explicit.
+`ProtectHome=true` is retained only when neither the policy configuration nor a
+configured source/destination is under `/home`, `/root`, or `/run/user`. When
+such access is required, the generated unit sets `ProtectHome=false` instead of
+hiding a path that the policy contract requires; `ProtectSystem=strict` and the
+explicit `ReadWritePaths` allow-list remain.
+
 The guided installer uses a stable version-independent virtual environment,
 copies a user-supplied policy, validates `check` and `plan` as the service user,
 and installs verified units. It intentionally does not start the mover or enable

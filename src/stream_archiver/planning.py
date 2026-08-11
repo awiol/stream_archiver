@@ -113,6 +113,7 @@ def build_archive_plan(
     actions = tuple(
         _plan_entry(policy, entry, regular_identities) for entry in stream.entries
     )
+    actions = _resolve_archive_path_collisions(actions)
     payload_actions = tuple(
         action
         for action in actions
@@ -127,7 +128,6 @@ def build_archive_plan(
     if not payload_actions:
         return None
 
-    _reject_archive_path_collisions(payload_actions)
     plan_id = _plan_id(policy, source_root, stream, actions)
     archive_name = (
         f"{_format_timestamp(stream.oldest_mtime_ns)}--"
@@ -201,25 +201,127 @@ def _resolved_target_identity(path: Path) -> tuple[int, int] | None:
     return metadata.st_dev, metadata.st_ino
 
 
-def _reject_archive_path_collisions(actions: tuple[PlannedAction, ...]) -> None:
+def _resolve_archive_path_collisions(
+    actions: tuple[PlannedAction, ...],
+) -> tuple[PlannedAction, ...]:
+    """Keep fixed payload paths stable and disambiguate generated compression paths.
+
+    Compression appends ``.gz`` or ``.bz2``. A source tree can already contain
+    that filename, for example both ``data.json`` and ``data.json.gz``. Aborting
+    the complete stream is unnecessary because the manifest records the final
+    payload path. Fixed move/symlink paths remain unchanged; only generated
+    compressed paths may receive a deterministic disambiguation suffix.
+    """
+
+    payload_kinds = {
+        ActionKind.MOVE,
+        ActionKind.GZIP,
+        ActionKind.BZ2,
+        ActionKind.PRESERVE_SYMLINK,
+    }
+    fixed_kinds = {ActionKind.MOVE, ActionKind.PRESERVE_SYMLINK}
     owners: dict[Path, Path] = {
         path: Path(f"<reserved:{path.name}>") for path in _RESERVED_ARCHIVE_PATHS
     }
+
     for action in actions:
+        if action.kind not in fixed_kinds:
+            continue
         assert action.archive_path is not None
-        archive_path = action.archive_path
-        for previous_path, previous_source in owners.items():
-            if (
-                archive_path == previous_path
-                or archive_path in previous_path.parents
-                or previous_path in archive_path.parents
-            ):
-                raise PlanningError(
-                    "archive path collision: "
-                    f"{previous_source} maps to {previous_path}, while "
-                    f"{action.source.relative_path} maps to {archive_path}"
-                )
-        owners[archive_path] = action.source.relative_path
+        conflict = _find_archive_path_conflict(action.archive_path, owners)
+        if conflict is not None:
+            previous_path, previous_source = conflict
+            _raise_fixed_archive_collision(
+                previous_source=previous_source,
+                previous_path=previous_path,
+                action=action,
+            )
+        owners[action.archive_path] = action.source.relative_path
+
+    resolved: list[PlannedAction] = []
+    for action in actions:
+        if action.kind not in payload_kinds or action.kind in fixed_kinds:
+            resolved.append(action)
+            continue
+
+        assert action.archive_path is not None
+        desired = action.archive_path
+        selected = desired
+        if _find_archive_path_conflict(selected, owners) is not None:
+            selected = _disambiguated_compression_path(action, owners)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "archive_path_disambiguated",
+                "compressed payload path changed to avoid an archive collision",
+                source_path=action.source.relative_path,
+                desired_archive_path=desired,
+                selected_archive_path=selected,
+                action=action.kind.value,
+            )
+        owners[selected] = action.source.relative_path
+        resolved.append(PlannedAction(action.source, action.kind, selected))
+
+    return tuple(resolved)
+
+
+def _find_archive_path_conflict(
+    candidate: Path, owners: dict[Path, Path]
+) -> tuple[Path, Path] | None:
+    for previous_path, previous_source in owners.items():
+        if (
+            candidate == previous_path
+            or candidate in previous_path.parents
+            or previous_path in candidate.parents
+        ):
+            return previous_path, previous_source
+    return None
+
+
+def _disambiguated_compression_path(
+    action: PlannedAction, owners: dict[Path, Path]
+) -> Path:
+    assert action.archive_path is not None
+    codec_suffix = ".gz" if action.kind is ActionKind.GZIP else ".bz2"
+    source_name = action.source.relative_path.name
+    digest = hashlib.sha256(
+        f"{action.kind.value}\0{action.source.relative_path.as_posix()}".encode("utf-8")
+    ).hexdigest()[:12]
+    base_name = f"{source_name}.stream-archiver-{digest}{codec_suffix}"
+    parent = action.archive_path.parent
+
+    candidate = parent / base_name
+    counter = 1
+    while _find_archive_path_conflict(candidate, owners) is not None:
+        candidate = parent / (
+            f"{source_name}.stream-archiver-{digest}-{counter}{codec_suffix}"
+        )
+        counter += 1
+    return candidate
+
+
+def _raise_fixed_archive_collision(
+    *, previous_source: Path, previous_path: Path, action: PlannedAction
+) -> None:
+    assert action.archive_path is not None
+    log_event(
+        LOGGER,
+        logging.ERROR,
+        "archive_path_collision",
+        "two fixed payload paths cannot coexist in one archive",
+        first_source_path=previous_source,
+        first_archive_path=previous_path,
+        second_source_path=action.source.relative_path,
+        second_archive_path=action.archive_path,
+        action=(
+            "rename one source path or change the symlink policy so the archive tree "
+            "has one filesystem object at each path"
+        ),
+    )
+    raise PlanningError(
+        "archive path collision between fixed payload paths; inspect the preceding "
+        "archive_path_collision log event for the two source and archive paths"
+    )
 
 
 def _plan_id(

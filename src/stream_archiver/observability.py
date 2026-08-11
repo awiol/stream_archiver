@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
 from typing import Any, TextIO
 
 _DEFAULT_EVENT = "message"
@@ -144,14 +146,30 @@ def _event_fields(record: logging.LogRecord) -> dict[str, Any]:
     return {key: _json_safe(value) for key, value in fields.items()}
 
 
+def quote_path(path: os.PathLike[str] | str) -> str:
+    """Return one filesystem path as an unambiguous JSON string literal.
+
+    Human-readable log messages sometimes need to mention a path outside a
+    structured field.  JSON quoting keeps whitespace, quotes, and backslashes
+    visually bounded without changing the underlying path value.
+    """
+
+    return json.dumps(os.fspath(path))
+
+
 def _json_safe(value: object) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(item) for item in value]
     return str(value)
 
 
 def _quote_text_value(value: object) -> str:
-    text = str(value)
-    if not text or any(character.isspace() or character in '="' for character in text):
-        return json.dumps(text)
-    return text
+    """Render a structured field without visually ambiguous strings."""
+
+    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))

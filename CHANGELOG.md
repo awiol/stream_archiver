@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 — 2026-08-10
+
+- Made text log string fields consistently JSON-quoted so paths containing
+  whitespace remain visually bounded; expected failures now expose structured
+  error type and detail fields.
+- Added explicit source-root diagnostics for missing, inaccessible/sandboxed,
+  symlinked, and non-directory paths.
+- Fixed generated systemd hardening so configured paths under `/home`, `/root`,
+  or `/run/user` are not hidden by `ProtectHome=true`.
+- Made generated gzip/bzip2 output names collision-tolerant: fixed source paths
+  remain unchanged while generated compressed names are deterministically
+  disambiguated when necessary.
+- Made `--config` optional for routine CLI use through `STREAM_ARCHIVER_CONFIG`,
+  the XDG user policy location, or `/etc/stream-archiver/policies.toml`.
+- Moved manual-run default lock/state locations under the user state directory
+  instead of beside the policy file.
+- Simplified first-run guidance: `plan` already validates configuration; a
+  separate `check` is mainly useful for configuration-only validation.
+
 ## 0.3.0 — 2026-08-04
 
 - Added structured text and JSON operational logging while keeping command JSON

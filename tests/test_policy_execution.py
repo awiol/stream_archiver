@@ -216,8 +216,8 @@ def test_verify_archive_rejects_tampered_success_marker(tmp_path: Path) -> None:
         verify_archive(archive)
 
 
-def test_plan_rejects_compression_destination_collision(tmp_path: Path) -> None:
-    """A generated compressed name cannot overwrite another source path."""
+def test_plan_disambiguates_compression_destination_collision(tmp_path: Path) -> None:
+    """A generated compressed name does not block an existing source filename."""
 
     source = tmp_path / "source"
     destination = tmp_path / "archive"
@@ -225,8 +225,21 @@ def test_plan_rejects_compression_destination_collision(tmp_path: Path) -> None:
     write_at(source / "data.json", b"source", old)
     write_at(source / "data.json.gz", b"already present", old + timedelta(hours=1))
 
-    with pytest.raises(PlanningError, match="archive path collision"):
-        plan_policy(_policy((source,), destination), now=NOW)
+    plan = plan_policy(_policy((source,), destination), now=NOW).archive_plans[0]
+    archive_paths = {
+        action.source.relative_path: action.archive_path for action in plan.actions
+    }
+
+    assert archive_paths[Path("data.json.gz")] == Path("data.json.gz")
+    compressed_path = archive_paths[Path("data.json")]
+    assert compressed_path is not None
+    assert compressed_path.name.startswith("data.json.stream-archiver-")
+    assert compressed_path.suffix == ".gz"
+
+    result = run_policy(_policy((source,), destination), now=NOW)
+    archive = result.archives[0].archive_directory
+    assert (archive / "data.json.gz").read_bytes() == b"already present"
+    assert gzip.decompress((archive / compressed_path).read_bytes()) == b"source"
 
 
 def test_plan_rejects_reserved_evidence_path(tmp_path: Path) -> None:
@@ -409,10 +422,10 @@ def test_recovery_rejects_manifest_path_traversal(tmp_path: Path) -> None:
     assert victim.read_text(encoding="utf-8") == "keep"
 
 
-def test_plan_rejects_file_directory_collision_created_by_compression(
+def test_plan_disambiguates_file_directory_collision_created_by_compression(
     tmp_path: Path,
 ) -> None:
-    """A generated `.bz2` file cannot replace a required directory path."""
+    """A generated `.bz2` file moves aside when that path is a source directory."""
 
     source = tmp_path / "source"
     destination = tmp_path / "archive"
@@ -420,8 +433,14 @@ def test_plan_rejects_file_directory_collision_created_by_compression(
     write_at(source / "report.html", b"report", old)
     write_at(source / "report.html.bz2/child.txt", b"child", old + timedelta(hours=1))
 
-    with pytest.raises(PlanningError, match="archive path collision"):
-        plan_policy(_policy((source,), destination), now=NOW)
+    plan = plan_policy(_policy((source,), destination), now=NOW).archive_plans[0]
+    html_action = next(
+        action for action in plan.actions if action.source.relative_path == Path("report.html")
+    )
+
+    assert html_action.archive_path is not None
+    assert html_action.archive_path != Path("report.html.bz2")
+    assert html_action.archive_path.name.startswith("report.html.stream-archiver-")
 
 
 def test_invalid_staging_path_is_reported_without_deleting_source(
