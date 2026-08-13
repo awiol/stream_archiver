@@ -1,13 +1,12 @@
-# stream-archiver 0.3.1
+# stream-archiver
 
 `stream-archiver` safely moves complete, old filesystem streams into
-period-named archive directories. It is intended for unattended Ubuntu systems
+period-named archive directories. It is intended for unattended Linux systems
 where a simple age cutoff could split a continuous sequence of files.
 
-The scheduler may check daily at a randomized time. A persistent state file
-makes actual archival work occur only after the configured elapsed interval,
-for example every 30 days. A failed run is not marked successful and is retried
-at a later check.
+The scheduler can check frequently while the application state controls when
+archival work is actually due. A failed run is not marked successful and is
+retried by a later scheduled check.
 
 ## Main behavior
 
@@ -37,34 +36,46 @@ cross-filesystem implementation is:
 7. write completion evidence after cleanup and fresh verification.
 
 Compression supports gzip and bzip2. Both always use level 9. If a generated
-compressed name conflicts with an existing payload path, for example
-`data.json -> data.json.gz` when `data.json.gz` already exists, the fixed source
-path is preserved and only the generated compressed path receives a
-deterministic disambiguation suffix recorded in the manifest.
+compressed name conflicts with an existing payload path, the fixed source path
+is preserved and only the generated compressed path receives a deterministic
+disambiguation suffix recorded in the manifest.
 
 ## Requirements
 
 - Ubuntu or another Linux system; the process lock uses `fcntl.flock`;
 - Python 3.11 or newer;
-- no runtime dependencies outside the Python standard library;
-- systemd only for the included scheduled-service workflow.
+- no runtime Python dependencies outside the standard library;
+- `uv` for the recommended installation and development workflow; and
+- systemd only for the scheduled-service workflow.
+
+The package does not require the operating system's `python3` command to point
+to Python 3.11. `uv` can select or provision a compatible Python independently.
 
 ## Install for command-line use
 
-The bundle contains a wheel and does not need network access:
+Create a dedicated environment with a compatible interpreter and install the
+current checkout:
 
 ```bash
-python3 -m venv ~/.local/share/stream-archiver/venv
-~/.local/share/stream-archiver/venv/bin/pip install \
-  --no-index --no-deps \
-  ./dist/stream_archiver-0.3.1-py3-none-any.whl
+uv venv --python 3.11 ~/.local/share/stream-archiver/venv
+uv pip install \
+  --python ~/.local/share/stream-archiver/venv/bin/python \
+  .
+```
+
+The command is then available at:
+
+```bash
+~/.local/share/stream-archiver/venv/bin/stream-archiver --help
 ```
 
 For development and tests:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -e '.[dev]'
+.venv/bin/ruff format --check .
+.venv/bin/ruff check .
 .venv/bin/pytest
 ```
 
@@ -128,15 +139,14 @@ The resolution order is: explicit `--config`, `STREAM_ARCHIVER_CONFIG`,
 `~/.config/stream-archiver/policies.toml`), then
 `/etc/stream-archiver/policies.toml`.
 
-A normal first review needs only:
+Review the read-only plan before the first destructive run:
 
 ```bash
 stream-archiver plan
 ```
 
-`plan` loads and validates the configuration before scanning sources, so a
-separate `check` is not required before it. `check` remains useful when only
-configuration syntax and policy validation should run.
+`plan` loads and validates the configuration before scanning sources. `check`
+remains available for configuration-only validation.
 
 Run immediately:
 
@@ -148,8 +158,7 @@ Manual runs place their default lock under `$XDG_STATE_HOME/stream-archiver` or
 `~/.local/state/stream-archiver`; `--lock-file` remains available for explicit
 overrides.
 
-Verify every committed archive under the selected destination roots when an
-independent audit is wanted:
+Verify committed archives independently:
 
 ```bash
 stream-archiver verify
@@ -166,7 +175,6 @@ so scripts can consume them without mixing them with logs.
 
 ```bash
 stream-archiver \
-  --config ~/stream-archiver-policies.toml \
   --log-level DEBUG \
   --log-format text \
   plan
@@ -184,10 +192,9 @@ At `INFO`, unattended runs report:
 - failures with a corrective action.
 
 `DEBUG` adds discovery, stream-selection, plan, lock, per-chunk milestone, and
-payload-verification details. Text-log string fields are always quoted, so a
-path containing spaces cannot visually run into the following field. Source
-access failures also report a structured `source` and `reason`. Paths and hashes
-are logged, but file contents are not.
+payload-verification details. Text-log string fields are quoted so paths with
+whitespace remain visually bounded. Source access failures report structured
+path and reason fields. Paths and hashes are logged, but file contents are not.
 
 For systemd:
 
@@ -199,54 +206,38 @@ journalctl -u stream-archiver.service -p warning..alert
 ## Systemd onboarding
 
 There are two supported workflows. Neither requires editing a tracked service
-file or a version-specific hardcoded path.
+file or a release-specific hardcoded path.
 
 ### Guided installer
 
 1. Create and review a user-owned policy file.
-2. Build or use the bundled wheel.
-3. Run:
+2. Build a wheel with `uv build --wheel`, or use a release wheel.
+3. Run the installer as root. If `uv` is installed only for your user, pass its
+   absolute path through `UV_BIN`:
 
 ```bash
-sudo ./tools/install-systemd.sh \
+sudo UV_BIN="$(command -v uv)" \
+  ./tools/install-systemd.sh \
   --config /absolute/path/to/your-policies.toml
 ```
 
-Common deployment options can be supplied directly, for example:
+The installer is designed for source checkouts that can contain multiple wheel
+files. It prefers a wheel matching the current project version; if none matches,
+it selects the newest candidate and warns. Release checksum evidence is
+opportunistic: a matching checksum entry is verified, an incorrect checksum
+fails installation, and a missing checksum file or wheel entry produces a
+warning instead of blocking installation.
 
-```bash
-sudo ./tools/install-systemd.sh \
-  --config /absolute/path/to/your-policies.toml \
-  --on-calendar daily \
-  --randomized-delay 6h \
-  --service-log-level INFO
-```
-
-The installer:
-
-- validates arguments and protects an existing installed policy before making
-  account or package changes;
-- verifies the bundled wheel against `SHA256SUMS` when that release evidence is
-  present;
-- installs into the stable path `/opt/stream-archiver/venv`;
-- copies the supplied policy to `/etc/stream-archiver/policies.toml`;
-- creates the service account when needed;
-- validates the configuration and read-only plan as the service user;
-- generates units from the actual executable, policy paths, sources, and
-  destinations;
-- verifies and installs the units; and
-- does **not** run archival work or enable the timer.
-
-It prints the exact manual-run and enablement commands. An existing installed
-configuration is not replaced unless `--replace-config` is supplied. The
-installer also accepts service name, user/group, calendar schedule, randomized
-delay, timer accuracy, and service log options; run it with `--help` for the
-complete interface.
+The installer uses a stable application path, installs the reviewed policy under
+`/etc/stream-archiver`, validates the read-only plan as the service user,
+generates deployment-specific units, verifies them, and reloads systemd. It does
+not run archival work or enable the timer. Run `tools/install-systemd.sh --help`
+for the deployment and interpreter options supported by the installed revision.
 
 ### Review-first unit generation
 
-Install the wheel, put the policy at its intended final path, then generate a
-reviewable deployment bundle:
+For an existing installation, put the policy at its intended final path and
+generate reviewable deployment files:
 
 ```bash
 /opt/stream-archiver/venv/bin/stream-archiver \
@@ -256,19 +247,14 @@ reviewable deployment bundle:
   --output-directory ./generated-systemd
 ```
 
-The output contains:
+The output contains a service, timer, and `INSTALL.md` with resolved validation
+and installation commands. Regenerate with `--force` after executable,
+policy-path, source, destination, identity, schedule, or service-log changes.
+Review the generated diff rather than editing generated units.
 
-- `stream-archiver.service` with `ReadWritePaths` derived from the policy;
-- `stream-archiver.timer`; and
-- `INSTALL.md` with resolved validation, installation, test, and enablement
-  commands.
-
-Regenerate with `--force` after executable, policy-path, source, destination,
-identity, schedule, or service-log changes. Review the diff rather than editing
-the generated unit. The generator keeps `ProtectHome=true` when possible, but
-disables that sandbox when the policy or configuration must access `/home`,
-`/root`, or `/run/user`; `ProtectSystem=strict` and generated `ReadWritePaths`
-remain in effect.
+The generator keeps `ProtectHome=true` when possible, but disables that sandbox
+when required configured paths are below `/home`, `/root`, or `/run/user`.
+`ProtectSystem=strict` and generated `ReadWritePaths` remain in effect.
 
 ## Completion evidence
 
@@ -279,9 +265,9 @@ Every current archive contains:
 - `SHA256SUMS.json`: a JSON index of archived regular payload hashes; and
 - `SUCCESS.json`: written only after source cleanup and fresh verification.
 
-`SUCCESS.json` proves that the local transaction completed and verified at that
-time. It is not a cryptographic signature against an actor able to replace the
-payload and all evidence files together.
+`SUCCESS.json` is evidence that the local transaction completed and verified at
+that time. It is not a cryptographic signature against an actor able to replace
+the payload and all evidence files together.
 
 ## Safety limits
 
@@ -297,5 +283,4 @@ shared producer lock or completion protocol.
 This tool is an archival mover with recovery and integrity evidence. It is not
 an independently verified backup or automatic restore system.
 
-See `docs/design.md`, `docs/operations.md`, `docs/usability-review.md`, and
-`docs/verification.md`.
+See `docs/design.md`, `docs/operations.md`, and `docs/verification.md`.

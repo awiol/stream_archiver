@@ -6,6 +6,11 @@ htmlcov/
 build/
 *.egg-info/
 .venv/
+.ruff_cache/
+dist/
+/SHA256SUMS
+.verification-dist/
+.verification-venv/
 
 SHA256SUMS
 docs/verification.md

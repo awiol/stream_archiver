@@ -69,9 +69,7 @@ class PolicyPlan:
         """Return all source-scoped plans without combining their entries."""
 
         return tuple(
-            plan
-            for source_plan in self.source_plans
-            for plan in source_plan.archive_plans
+            plan for source_plan in self.source_plans for plan in source_plan.archive_plans
         )
 
 

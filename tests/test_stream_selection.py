@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stream_archiver.model import Entry, EntryKind, FileIdentity
 from stream_archiver.planning import select_eligible_streams, split_streams
 
-NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def test_cutoff_does_not_divide_one_continuous_stream() -> None:
@@ -82,9 +82,7 @@ def test_age_cutoff_uses_exact_integer_nanoseconds() -> None:
     """An entry at the cutoff is eligible while one nanosecond newer is not."""
 
     cutoff_ns = int(NOW.timestamp()) * 1_000_000_000 - 30 * 24 * 60 * 60 * 1_000_000_000
-    exact_stream = split_streams(
-        (_entry_ns("exact", cutoff_ns),), minimum_gap=timedelta(hours=8)
-    )
+    exact_stream = split_streams((_entry_ns("exact", cutoff_ns),), minimum_gap=timedelta(hours=8))
     newer_stream = split_streams(
         (_entry_ns("newer", cutoff_ns + 1),), minimum_gap=timedelta(hours=8)
     )
@@ -93,10 +91,7 @@ def test_age_cutoff_uses_exact_integer_nanoseconds() -> None:
         select_eligible_streams(exact_stream, now=NOW, minimum_age=timedelta(days=30))
         == exact_stream
     )
-    assert (
-        select_eligible_streams(newer_stream, now=NOW, minimum_age=timedelta(days=30))
-        == ()
-    )
+    assert select_eligible_streams(newer_stream, now=NOW, minimum_age=timedelta(days=30)) == ()
 
 
 def test_stream_grouping_rejects_non_positive_gap() -> None:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stream_archiver.state import DueState, load_state, save_state
 
-NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def test_policy_becomes_due_at_exact_interval() -> None:

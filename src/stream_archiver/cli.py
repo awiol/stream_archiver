@@ -7,9 +7,9 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 from stream_archiver.config import AppConfig, Policy, load_config
 from stream_archiver.errors import ConfigurationError, StreamArchiverError
@@ -89,9 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "verify":
             destinations = sorted({policy.destination for policy in policies})
             results = [
-                result
-                for destination in destinations
-                for result in verify_destination(destination)
+                result for destination in destinations for result in verify_destination(destination)
             ]
             _print_json([_verification_summary(result) for result in results])
             log_event(
@@ -229,9 +227,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check", help="validate configuration")
     subparsers.add_parser("plan", help="show eligible streams without modifying files")
-    subparsers.add_parser(
-        "verify", help="recompute archive hashes and success evidence"
-    )
+    subparsers.add_parser("verify", help="recompute archive hashes and success evidence")
 
     run = subparsers.add_parser("run", help="run selected policies immediately")
     run.add_argument("--lock-file", type=Path)
@@ -361,14 +357,14 @@ def _select_policies(config: AppConfig, selected: list[str]) -> tuple[Policy, ..
 
 def _parse_now(value: str | None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ConfigurationError("--now must be a valid ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ConfigurationError("--now must include a UTC offset")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _default_state_file() -> Path:
@@ -378,11 +374,7 @@ def _default_state_file() -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve(strict=False)
     xdg_state_home = os.environ.get("XDG_STATE_HOME")
-    root = (
-        Path(xdg_state_home).expanduser()
-        if xdg_state_home
-        else Path.home() / ".local" / "state"
-    )
+    root = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
     return root / "stream-archiver" / "state.json"
 
 
@@ -464,9 +456,7 @@ def _verification_summary(result: object) -> dict[str, object]:
         "manifest_sha256": result.manifest_sha256,
         "checksums_sha256": result.checksums_sha256,
         "success_evidence": (
-            str(result.success_evidence)
-            if result.success_evidence is not None
-            else None
+            str(result.success_evidence) if result.success_evidence is not None else None
         ),
     }
 
@@ -488,9 +478,7 @@ def _run_summary(result: PolicyRunResult) -> dict[str, object]:
                 "dropped_alias_symlinks": item.dropped_alias_symlinks,
                 "skipped_symlinks": item.skipped_symlinks,
                 "success_evidence": (
-                    str(item.success_evidence)
-                    if item.success_evidence is not None
-                    else None
+                    str(item.success_evidence) if item.success_evidence is not None else None
                 ),
             }
             for item in result.archives

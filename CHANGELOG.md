@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.4b1 — 2026-08-13
+
+- Promoted the 0.3.4 line to beta after the logging, deployment, path-diagnostic,
+  compression-collision, and CLI usability work reached stabilization.
+- Updated installer behavior accumulated during the 0.3.x fix series: source
+  checkouts may contain multiple wheels, a current-version wheel is preferred,
+  and the newest wheel is used as a warned fallback.
+- Made release checksum evidence optional for installation when the checksum
+  file or selected-wheel entry is absent. An explicitly supplied mismatching
+  checksum still fails installation.
+- Documented the `uv`-based Python workflow so installation does not depend on
+  the operating system `python3` command satisfying the Python 3.11 minimum.
+- Refreshed README and operations guidance to describe current config discovery,
+  logging, systemd sandbox behavior, installer recovery gates, and routine CLI
+  usage without historical version-specific sections.
+- Replaced the release-specific verification record with an evergreen
+  verification guide and removed the iteration-specific usability review from
+  tracked product documentation.
+- Removed third-party author attribution from package metadata and changed the
+  package development-status classifier from Alpha to Beta.
+- Updated package license metadata to the current SPDX string form and raised the
+  setuptools build minimum accordingly.
+- Added Ruff to development dependencies and recorded the project formatting
+  target.
+- Excluded generated wheels, root release checksum sidecars, Ruff caches, and
+  temporary verification environments from source control.
+
 ## 0.3.1 — 2026-08-10
 
 - Made text log string fields consistently JSON-quoted so paths containing
@@ -36,7 +63,7 @@
   changing the system, and deliberately does not start work or enable the timer.
 - Exposed service name, schedule, timer accuracy, randomized delay, and service
   log settings as installer options.
-- Added usability review, operations guidance, and behavioral tests for logging,
+- Added operations guidance and behavioral tests for logging,
   item/byte/percentage progress, JSON events, systemd generation, path escaping,
   and overwrite protection.
 

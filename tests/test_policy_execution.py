@@ -7,7 +7,7 @@ import gzip
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -30,7 +30,7 @@ from stream_archiver.model import ActionKind
 from stream_archiver.service import plan_policy, run_policy
 from tests.helpers import symlink_at, write_at
 
-NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def test_run_policy_safely_moves_and_compresses_with_success_evidence(
@@ -78,10 +78,7 @@ def test_run_policy_safely_moves_and_compresses_with_success_evidence(
     assert execution.uncompressed_files == 1
     assert execution.gzip_files == 1
     assert execution.bz2_files == 1
-    assert (
-        gzip.decompress((archive / "session/data.json.gz").read_bytes())
-        == b'{"value": 1}\n'
-    )
+    assert gzip.decompress((archive / "session/data.json.gz").read_bytes()) == b'{"value": 1}\n'
     compressed_html = archive / "session/report.HTML.bz2"
     assert bz2.decompress(compressed_html.read_bytes()) == b"<h1>report</h1>\n"
     assert (archive / "session/plain.txt").read_bytes() == b"plain\n"
@@ -100,14 +97,8 @@ def test_run_policy_safely_moves_and_compresses_with_success_evidence(
     assert manifest["cleanup_complete"] is True
     assert manifest["compression_level"] == 9
     assert success["status"] == "completed"
-    assert (
-        success["manifest_sha256"]
-        == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    )
-    assert (
-        success["checksums_sha256"]
-        == hashlib.sha256(checksums_path.read_bytes()).hexdigest()
-    )
+    assert success["manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert success["checksums_sha256"] == hashlib.sha256(checksums_path.read_bytes()).hexdigest()
     assert {item["compression"] for item in checksums["files"]} == {None, "gzip", "bz2"}
     assert verify_archive(archive).success_evidence == success_path
 
@@ -139,9 +130,7 @@ def test_multiple_sources_produce_separate_final_directories(tmp_path: Path) -> 
     assert len(result.archives) == 2
     directories = {item.archive_directory for item in result.archives}
     assert len(directories) == 2
-    archived_contents = {
-        (directory / "same.txt").read_bytes() for directory in directories
-    }
+    archived_contents = {(directory / "same.txt").read_bytes() for directory in directories}
     assert archived_contents == {b"first", b"second"}
     manifests = [
         json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
@@ -189,9 +178,7 @@ def test_policies_with_shared_destination_create_distinct_archives(
     }
     assert len(directories) == 2
     assert {
-        json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))[
-            "policy_name"
-        ]
+        json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))["policy_name"]
         for directory in directories
     } == {"first-policy", "second-policy"}
 
@@ -202,11 +189,7 @@ def test_verify_archive_rejects_tampered_success_marker(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"
     write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
-    archive = (
-        run_policy(_policy((source,), destination), now=NOW)
-        .archives[0]
-        .archive_directory
-    )
+    archive = run_policy(_policy((source,), destination), now=NOW).archives[0].archive_directory
     success_path = archive / SUCCESS_NAME
     success = json.loads(success_path.read_text(encoding="utf-8"))
     success["manifest_sha256"] = "0" * 64
@@ -226,9 +209,7 @@ def test_plan_disambiguates_compression_destination_collision(tmp_path: Path) ->
     write_at(source / "data.json.gz", b"already present", old + timedelta(hours=1))
 
     plan = plan_policy(_policy((source,), destination), now=NOW).archive_plans[0]
-    archive_paths = {
-        action.source.relative_path: action.archive_path for action in plan.actions
-    }
+    archive_paths = {action.source.relative_path: action.archive_path for action in plan.actions}
 
     assert archive_paths[Path("data.json.gz")] == Path("data.json.gz")
     compressed_path = archive_paths[Path("data.json")]
@@ -281,11 +262,7 @@ def test_staging_failure_leaves_sources_and_no_committed_archive(
         run_policy(_policy((source,), destination), now=NOW)
 
     assert original.read_bytes() == b"important"
-    committed = [
-        path
-        for path in destination.iterdir()
-        if path.name != ".stream-archiver-staging"
-    ]
+    committed = [path for path in destination.iterdir() if path.name != ".stream-archiver-staging"]
     assert committed == []
 
 
@@ -307,9 +284,7 @@ def test_pending_cleanup_has_no_success_marker_and_recovery_creates_one(
         run_policy(_policy((source,), destination), now=NOW)
 
     archive = next(
-        path
-        for path in destination.iterdir()
-        if path.name != ".stream-archiver-staging"
+        path for path in destination.iterdir() if path.name != ".stream-archiver-staging"
     )
     pending = json.loads((archive / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert pending["cleanup_complete"] is False
@@ -317,9 +292,7 @@ def test_pending_cleanup_has_no_success_marker_and_recovery_creates_one(
     assert original.exists()
 
     monkeypatch.undo()
-    recovered = recover_pending_archives(
-        destination, source, now=NOW + timedelta(hours=1)
-    )
+    recovered = recover_pending_archives(destination, source, now=NOW + timedelta(hours=1))
 
     assert recovered == (archive,)
     assert not original.exists()
@@ -358,11 +331,7 @@ def test_verify_archive_detects_payload_corruption(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"
     write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
-    archive = (
-        run_policy(_policy((source,), destination), now=NOW)
-        .archives[0]
-        .archive_directory
-    )
+    archive = run_policy(_policy((source,), destination), now=NOW).archives[0].archive_directory
     (archive / "data.txt").write_bytes(b"corrupt")
 
     with pytest.raises(RecoveryError, match="(size|SHA-256) mismatch"):
@@ -452,9 +421,7 @@ def test_invalid_staging_path_is_reported_without_deleting_source(
     destination = tmp_path / "archive"
     original = write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
     destination.mkdir()
-    (destination / ".stream-archiver-staging").write_text(
-        "not a directory", encoding="utf-8"
-    )
+    (destination / ".stream-archiver-staging").write_text("not a directory", encoding="utf-8")
 
     with pytest.raises(ExecutionError, match="filesystem operation failed"):
         run_policy(_policy((source,), destination), now=NOW)

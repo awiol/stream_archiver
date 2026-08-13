@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ class DueState:
         previous = self.last_success.get(policy_name)
         return previous is None or now_utc - previous >= interval
 
-    def with_success(self, policy_name: str, *, when: datetime) -> "DueState":
+    def with_success(self, policy_name: str, *, when: datetime) -> DueState:
         """Return a new state recording one successful policy completion."""
 
         updated = dict(self.last_success)
@@ -60,25 +60,19 @@ def load_state(path: Path) -> DueState:
         raise ExecutionError(f"unsupported due-state version in {path}")
     last_success_raw = raw.get("last_success")
     if not isinstance(last_success_raw, dict):
-        raise ExecutionError(
-            f"invalid due state in {path}: last_success must be an object"
-        )
+        raise ExecutionError(f"invalid due state in {path}: last_success must be an object")
 
     parsed: dict[str, datetime] = {}
     for name, timestamp in last_success_raw.items():
         if not isinstance(name, str) or not isinstance(timestamp, str):
             raise ExecutionError(f"invalid due state entry in {path}")
         try:
-            moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            moment = datetime.fromisoformat(timestamp)
         except ValueError as exc:
-            raise ExecutionError(
-                f"invalid timestamp for policy {name!r} in {path}"
-            ) from exc
+            raise ExecutionError(f"invalid timestamp for policy {name!r} in {path}") from exc
         if moment.tzinfo is None or moment.utcoffset() is None:
-            raise ExecutionError(
-                f"timestamp for policy {name!r} in {path} must include an offset"
-            )
-        parsed[name] = moment.astimezone(timezone.utc)
+            raise ExecutionError(f"timestamp for policy {name!r} in {path} must include an offset")
+        parsed[name] = moment.astimezone(UTC)
     log_event(
         LOGGER,
         logging.DEBUG,
@@ -97,7 +91,7 @@ def save_state(path: Path, state: DueState) -> None:
     payload: dict[str, Any] = {
         "state_format_version": STATE_FORMAT_VERSION,
         "last_success": {
-            name: moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            name: moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
             for name, moment in sorted(state.last_success.items())
         },
     }
@@ -133,4 +127,4 @@ def _fsync_directory(path: Path) -> None:
 def _require_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ExecutionError("due-state timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)

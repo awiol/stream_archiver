@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import json
+import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stream_archiver.config import CompressionCodec, Policy, SymlinkRule
 from stream_archiver.errors import PlanningError
-from stream_archiver.observability import log_event
 from stream_archiver.model import (
     ActionKind,
     ArchivePlan,
@@ -20,6 +19,7 @@ from stream_archiver.model import (
     PlannedAction,
     Stream,
 )
+from stream_archiver.observability import log_event
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,9 +32,7 @@ _RESERVED_ARCHIVE_PATHS = frozenset(
 )
 
 
-def split_streams(
-    entries: tuple[Entry, ...], *, minimum_gap: timedelta
-) -> tuple[Stream, ...]:
+def split_streams(entries: tuple[Entry, ...], *, minimum_gap: timedelta) -> tuple[Stream, ...]:
     """Split ordered entries whenever an adjacent gap is at least ``minimum_gap``."""
 
     if minimum_gap <= timedelta(0):
@@ -72,9 +70,7 @@ def select_eligible_streams(
         raise PlanningError("minimum_age must be positive")
     now_utc = _require_aware_utc(now)
     cutoff_ns = _datetime_to_ns(now_utc) - _timedelta_to_ns(minimum_age)
-    eligible = tuple(
-        stream for stream in streams if stream.newest_mtime_ns <= cutoff_ns
-    )
+    eligible = tuple(stream for stream in streams if stream.newest_mtime_ns <= cutoff_ns)
     log_event(
         LOGGER,
         logging.DEBUG,
@@ -101,18 +97,14 @@ def build_archive_plan(
     """
 
     if source_root not in policy.sources:
-        raise PlanningError(
-            f"source is not owned by policy {policy.name!r}: {source_root}"
-        )
+        raise PlanningError(f"source is not owned by policy {policy.name!r}: {source_root}")
 
     regular_identities = {
         (entry.identity.device, entry.identity.inode)
         for entry in stream.entries
         if entry.kind is EntryKind.REGULAR
     }
-    actions = tuple(
-        _plan_entry(policy, entry, regular_identities) for entry in stream.entries
-    )
+    actions = tuple(_plan_entry(policy, entry, regular_identities) for entry in stream.entries)
     actions = _resolve_archive_path_collisions(actions)
     payload_actions = tuple(
         action
@@ -166,17 +158,13 @@ def _plan_entry(
             return PlannedAction(
                 source=entry,
                 kind=ActionKind.GZIP,
-                archive_path=entry.relative_path.with_name(
-                    entry.relative_path.name + ".gz"
-                ),
+                archive_path=entry.relative_path.with_name(entry.relative_path.name + ".gz"),
             )
         if codec is CompressionCodec.BZ2:
             return PlannedAction(
                 source=entry,
                 kind=ActionKind.BZ2,
-                archive_path=entry.relative_path.with_name(
-                    entry.relative_path.name + ".bz2"
-                ),
+                archive_path=entry.relative_path.with_name(entry.relative_path.name + ".bz2"),
             )
         return PlannedAction(entry, ActionKind.MOVE, entry.relative_path)
 
@@ -278,14 +266,12 @@ def _find_archive_path_conflict(
     return None
 
 
-def _disambiguated_compression_path(
-    action: PlannedAction, owners: dict[Path, Path]
-) -> Path:
+def _disambiguated_compression_path(action: PlannedAction, owners: dict[Path, Path]) -> Path:
     assert action.archive_path is not None
     codec_suffix = ".gz" if action.kind is ActionKind.GZIP else ".bz2"
     source_name = action.source.relative_path.name
     digest = hashlib.sha256(
-        f"{action.kind.value}\0{action.source.relative_path.as_posix()}".encode("utf-8")
+        f"{action.kind.value}\0{action.source.relative_path.as_posix()}".encode()
     ).hexdigest()[:12]
     base_name = f"{source_name}.stream-archiver-{digest}{codec_suffix}"
     parent = action.archive_path.parent
@@ -293,9 +279,7 @@ def _disambiguated_compression_path(
     candidate = parent / base_name
     counter = 1
     while _find_archive_path_conflict(candidate, owners) is not None:
-        candidate = parent / (
-            f"{source_name}.stream-archiver-{digest}-{counter}{codec_suffix}"
-        )
+        candidate = parent / (f"{source_name}.stream-archiver-{digest}-{counter}{codec_suffix}")
         counter += 1
     return candidate
 
@@ -340,9 +324,7 @@ def _plan_id(
                 "kind": action.source.kind.value,
                 "action": action.kind.value,
                 "archive_path": (
-                    action.archive_path.as_posix()
-                    if action.archive_path is not None
-                    else None
+                    action.archive_path.as_posix() if action.archive_path is not None else None
                 ),
                 "device": action.source.identity.device,
                 "inode": action.source.identity.inode,
@@ -362,7 +344,7 @@ def _plan_id(
 
 def _format_timestamp(mtime_ns: int) -> str:
     seconds, nanoseconds = divmod(mtime_ns, 1_000_000_000)
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    moment = datetime.fromtimestamp(seconds, tz=UTC)
     return f"{moment:%Y%m%dT%H%M%S}.{nanoseconds // 1_000:06d}Z"
 
 
@@ -372,11 +354,11 @@ def _timedelta_to_ns(value: timedelta) -> int:
 
 
 def _datetime_to_ns(value: datetime) -> int:
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
     return _timedelta_to_ns(value - epoch)
 
 
 def _require_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise PlanningError("now must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)

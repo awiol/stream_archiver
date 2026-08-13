@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stream_archiver.config import Policy, SymlinkRule
@@ -12,7 +12,7 @@ from stream_archiver.observability import configure_logging, log_event
 from stream_archiver.service import run_policy
 from tests.helpers import write_at
 
-NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def test_json_logging_preserves_native_event_fields() -> None:
@@ -61,16 +61,12 @@ def test_policy_run_logs_action_and_byte_progress(tmp_path: Path) -> None:
     assert "archive_action_progress_debug" in names
     assert "source_cleanup_progress" in names
     assert "archive_execution_completed" in names
-    progress = next(
-        event for event in events if event["event"] == "archive_action_progress"
-    )
+    progress = next(event for event in events if event["event"] == "archive_action_progress")
     assert progress["action_progress"] == "1/1"
     assert progress["file_bytes"].endswith(f"/{3 * 1024 * 1024}")
     assert progress["overall_bytes"].endswith(f"/{3 * 1024 * 1024}")
     assert 0 < progress["overall_percent"] < 100
-    completed = next(
-        event for event in events if event["event"] == "archive_action_completed"
-    )
+    completed = next(event for event in events if event["event"] == "archive_action_completed")
     assert completed["percent"] == 100
     assert completed["overall_percent"] == 100
 
@@ -125,9 +121,7 @@ def test_text_logging_quotes_paths_and_other_string_fields() -> None:
     assert 'operation="plan"' in rendered
 
 
-def test_missing_source_log_has_structured_path_and_reason(
-    tmp_path: Path, capsys: object
-) -> None:
+def test_missing_source_log_has_structured_path_and_reason(tmp_path: Path, capsys: object) -> None:
     """A missing source is diagnosed separately from generic non-directory failure."""
 
     from stream_archiver.cli import main

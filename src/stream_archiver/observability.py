@@ -11,8 +11,8 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, TextIO
 
 _DEFAULT_EVENT = "message"
@@ -33,7 +33,7 @@ class TextEventFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Return a stable text representation suitable for journald."""
 
-        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        timestamp = datetime.fromtimestamp(record.created, tz=UTC)
         event = getattr(record, "event", _DEFAULT_EVENT)
         fields = _event_fields(record)
         prefix = (
@@ -62,7 +62,7 @@ class JsonEventFormatter(logging.Formatter):
         """Return a JSON line with stable core fields and event context."""
 
         payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc)
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC)
             .isoformat(timespec="milliseconds")
             .replace("+00:00", "Z"),
             "level": record.levelname,
@@ -94,9 +94,7 @@ def configure_logging(
     for handler in tuple(logger.handlers):
         logger.removeHandler(handler)
 
-    handler = (
-        logging.StreamHandler(stream) if stream is not None else _DynamicStderrHandler()
-    )
+    handler = logging.StreamHandler(stream) if stream is not None else _DynamicStderrHandler()
     if format_name == "text":
         handler.setFormatter(TextEventFormatter())
     elif format_name == "json":

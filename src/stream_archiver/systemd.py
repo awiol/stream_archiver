@@ -186,9 +186,7 @@ def _service_unit(
     permissions = "\n".join(
         f"ReadWritePaths={_quote_unit_argument(str(path))}" for path in writable_paths
     )
-    protect_home = (
-        "false" if _requires_home_access([config_path, *writable_paths]) else "true"
-    )
+    protect_home = "false" if _requires_home_access([config_path, *writable_paths]) else "true"
     return f"""[Unit]
 Description=Archive complete old filesystem streams
 ConditionPathExists={_escape_unit_path(config_path)}
@@ -234,11 +232,7 @@ def _requires_home_access(paths: list[Path]) -> bool:
     """
 
     protected_roots = (Path("/home"), Path("/root"), Path("/run/user"))
-    return any(
-        path == root or root in path.parents
-        for path in paths
-        for root in protected_roots
-    )
+    return any(path == root or root in path.parents for path in paths for root in protected_roots)
 
 
 def _escape_unit_path(path: Path) -> str:
@@ -359,18 +353,14 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def _validate_identifier(
-    value: str, description: str, pattern: re.Pattern[str]
-) -> None:
+def _validate_identifier(value: str, description: str, pattern: re.Pattern[str]) -> None:
     if not pattern.fullmatch(value):
         raise ConfigurationError(f"invalid {description}: {value!r}")
 
 
 def _reject_control_characters(value: str, description: str) -> None:
     if not value or any(character in value for character in ("\x00", "\n", "\r")):
-        raise ConfigurationError(
-            f"invalid {description}: control characters are not allowed"
-        )
+        raise ConfigurationError(f"invalid {description}: control characters are not allowed")
 
 
 def _write_text(path: Path, text: str) -> None:

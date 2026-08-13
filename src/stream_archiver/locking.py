@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import fcntl
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import TextIO
 
 from stream_archiver.errors import LockUnavailableError
 from stream_archiver.observability import log_event
@@ -31,9 +32,7 @@ def execution_lock(path: Path) -> Iterator[None]:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise LockUnavailableError(
-                f"another stream-archiver run owns {path}"
-            ) from exc
+            raise LockUnavailableError(f"another stream-archiver run owns {path}") from exc
         log_event(
             LOGGER,
             logging.INFO,

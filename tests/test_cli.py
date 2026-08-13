@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stream_archiver.cli import main
 from tests.helpers import write_at
 
-NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
-def test_run_if_due_archives_once_then_reports_not_due(
-    tmp_path: Path, capsys: object
-) -> None:
+def test_run_if_due_archives_once_then_reports_not_due(tmp_path: Path, capsys: object) -> None:
     """Frequent invocations perform the first due run and suppress the next early run."""
 
     source = tmp_path / "source"

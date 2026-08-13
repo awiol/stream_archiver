@@ -118,39 +118,27 @@ class Policy:
             )
         if not isinstance(self.sources, tuple) or not self.sources:
             raise ConfigurationError("policy sources must be a non-empty tuple")
-        if not all(
-            isinstance(source, Path) and source.is_absolute() for source in self.sources
-        ):
+        if not all(isinstance(source, Path) and source.is_absolute() for source in self.sources):
             raise ConfigurationError("every policy source must be an absolute Path")
         if not isinstance(self.destination, Path) or not self.destination.is_absolute():
             raise ConfigurationError("policy destination must be an absolute Path")
 
-        normalized_sources = tuple(
-            source.resolve(strict=False) for source in self.sources
-        )
+        normalized_sources = tuple(source.resolve(strict=False) for source in self.sources)
         normalized_destination = self.destination.resolve(strict=False)
         object.__setattr__(self, "sources", normalized_sources)
         object.__setattr__(self, "destination", normalized_destination)
 
         if len(normalized_sources) != len(set(normalized_sources)):
-            raise ConfigurationError(
-                "policy sources must be unique after path resolution"
-            )
+            raise ConfigurationError("policy sources must be unique after path resolution")
         for source in normalized_sources:
-            _validate_disjoint_paths(
-                source, normalized_destination, f"policy {self.name!r}"
-            )
+            _validate_disjoint_paths(source, normalized_destination, f"policy {self.name!r}")
         _validate_source_roots(
             tuple((self.name, source) for source in normalized_sources),
             context=f"policy {self.name!r}",
         )
-        if not isinstance(self.minimum_age, timedelta) or self.minimum_age <= timedelta(
-            0
-        ):
+        if not isinstance(self.minimum_age, timedelta) or self.minimum_age <= timedelta(0):
             raise ConfigurationError("policy minimum_age must be a positive timedelta")
-        if not isinstance(self.stream_gap, timedelta) or self.stream_gap <= timedelta(
-            0
-        ):
+        if not isinstance(self.stream_gap, timedelta) or self.stream_gap <= timedelta(0):
             raise ConfigurationError("policy stream_gap must be a positive timedelta")
         if not isinstance(self.symlink_rule, SymlinkRule):
             raise ConfigurationError("policy symlink_rule must be a SymlinkRule")
@@ -181,9 +169,7 @@ class AppConfig:
     def __post_init__(self) -> None:
         """Validate scheduling and cross-policy path ownership for Python callers."""
 
-        if not isinstance(
-            self.run_interval, timedelta
-        ) or self.run_interval <= timedelta(0):
+        if not isinstance(self.run_interval, timedelta) or self.run_interval <= timedelta(0):
             raise ConfigurationError("run_interval must be a positive timedelta")
         if not isinstance(self.policies, tuple) or not self.policies:
             raise ConfigurationError("policies must be a non-empty tuple")
@@ -244,13 +230,9 @@ def load_config(path: Path) -> AppConfig:
     run_interval = parse_duration(raw.get("run_interval", "30d"), field="run_interval")
     raw_policies = raw.get("policies")
     if not isinstance(raw_policies, list) or not raw_policies:
-        raise ConfigurationError(
-            "configuration must contain at least one [[policies]] table"
-        )
+        raise ConfigurationError("configuration must contain at least one [[policies]] table")
 
-    policies = tuple(
-        _parse_policy(item, index) for index, item in enumerate(raw_policies)
-    )
+    policies = tuple(_parse_policy(item, index) for index, item in enumerate(raw_policies))
     config = AppConfig(run_interval=run_interval, policies=policies)
     for policy in policies:
         log_event(
@@ -280,9 +262,7 @@ def load_config(path: Path) -> AppConfig:
 def _validate_policy_roots(policies: tuple[Policy, ...]) -> None:
     """Protect source ownership while permitting a shared destination root."""
 
-    sources = tuple(
-        (policy.name, source) for policy in policies for source in policy.sources
-    )
+    sources = tuple((policy.name, source) for policy in policies for source in policy.sources)
     _validate_source_roots(sources, context="configuration")
 
     destinations = tuple((policy.name, policy.destination) for policy in policies)
@@ -307,9 +287,7 @@ def _validate_policy_roots(policies: tuple[Policy, ...]) -> None:
                 )
 
 
-def _validate_source_roots(
-    sources: tuple[tuple[str, Path], ...], *, context: str
-) -> None:
+def _validate_source_roots(sources: tuple[tuple[str, Path], ...], *, context: str) -> None:
     for index, (first_name, first_path) in enumerate(sources):
         for second_name, second_path in sources[index + 1 :]:
             if _paths_overlap(first_path, second_path):
@@ -343,13 +321,9 @@ def _parse_policy(raw: Any, index: int) -> Policy:
         symlink_rule = SymlinkRule(symlink_value)
     except ValueError as exc:
         choices = ", ".join(rule.value for rule in SymlinkRule)
-        raise ConfigurationError(
-            f"{context}.symlink_rule must be one of: {choices}"
-        ) from exc
+        raise ConfigurationError(f"{context}.symlink_rule must be one of: {choices}") from exc
 
-    compression_rules = _parse_compression_rules(
-        raw.get("compression_rules", []), context
-    )
+    compression_rules = _parse_compression_rules(raw.get("compression_rules", []), context)
     return Policy(
         name=name,
         sources=sources,
@@ -365,9 +339,7 @@ def _source_paths(raw: dict[str, Any], context: str) -> tuple[Path, ...]:
     has_source = "source" in raw
     has_sources = "sources" in raw
     if has_source == has_sources:
-        raise ConfigurationError(
-            f"{context} must define exactly one of 'source' or 'sources'"
-        )
+        raise ConfigurationError(f"{context} must define exactly one of 'source' or 'sources'")
     if has_source:
         return (_absolute_path(raw, "source", context),)
 
@@ -377,20 +349,14 @@ def _source_paths(raw: dict[str, Any], context: str) -> tuple[Path, ...]:
     paths: list[Path] = []
     for item_index, value in enumerate(values):
         if not isinstance(value, str) or not value.strip():
-            raise ConfigurationError(
-                f"{context}.sources[{item_index}] must be a non-empty string"
-            )
+            raise ConfigurationError(f"{context}.sources[{item_index}] must be a non-empty string")
         paths.append(_expanded_absolute_path(value, f"{context}.sources[{item_index}]"))
     return tuple(paths)
 
 
-def _parse_compression_rules(
-    raw: Any, policy_context: str
-) -> tuple[CompressionRule, ...]:
+def _parse_compression_rules(raw: Any, policy_context: str) -> tuple[CompressionRule, ...]:
     if not isinstance(raw, list):
-        raise ConfigurationError(
-            f"{policy_context}.compression_rules must be an array of tables"
-        )
+        raise ConfigurationError(f"{policy_context}.compression_rules must be an array of tables")
 
     rules: list[CompressionRule] = []
     for index, item in enumerate(raw):
@@ -404,15 +370,11 @@ def _parse_compression_rules(
             codec = CompressionCodec(compression)
         except (TypeError, ValueError) as exc:
             choices = ", ".join(codec.value for codec in CompressionCodec)
-            raise ConfigurationError(
-                f"{context}.compression must be one of: {choices}"
-            ) from exc
+            raise ConfigurationError(f"{context}.compression must be one of: {choices}") from exc
 
         suffixes_raw = item.get("suffixes")
         if not isinstance(suffixes_raw, list) or not suffixes_raw:
-            raise ConfigurationError(
-                f"{context}.suffixes must be a non-empty string array"
-            )
+            raise ConfigurationError(f"{context}.suffixes must be a non-empty string array")
         rules.append(CompressionRule(tuple(suffixes_raw), codec))
 
     result = tuple(rules)
@@ -450,9 +412,7 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
-def _validate_suffix_ownership(
-    rules: tuple[CompressionRule, ...], policy_context: str
-) -> None:
+def _validate_suffix_ownership(rules: tuple[CompressionRule, ...], policy_context: str) -> None:
     owners: dict[str, int] = {}
     for rule_index, rule in enumerate(rules):
         for suffix in rule.suffixes:
@@ -464,11 +424,7 @@ def _validate_suffix_ownership(
             owners[key] = rule_index
 
 
-def _reject_unknown(
-    raw: dict[str, Any], allowed: frozenset[str], *, context: str
-) -> None:
+def _reject_unknown(raw: dict[str, Any], allowed: frozenset[str], *, context: str) -> None:
     unknown = sorted(set(raw) - allowed)
     if unknown:
-        raise ConfigurationError(
-            f"{context} contains unknown keys: {', '.join(unknown)}"
-        )
+        raise ConfigurationError(f"{context} contains unknown keys: {', '.join(unknown)}")

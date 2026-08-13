@@ -59,9 +59,7 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
                 )
                 continue
             except OSError as exc:
-                raise ExecutionError(
-                    f"cannot inspect source entry {path}: {exc}"
-                ) from exc
+                raise ExecutionError(f"cannot inspect source entry {path}: {exc}") from exc
             if stat.S_ISLNK(metadata.st_mode):
                 entries.append(_entry_from_stat(source, path, metadata))
             else:
@@ -135,9 +133,7 @@ def _validate_source_directory(source: Path) -> None:
             reason="missing",
             action="create or correct the configured source path",
         )
-        raise ExecutionError(
-            f"source directory does not exist: {quote_path(source)}"
-        ) from exc
+        raise ExecutionError(f"source directory does not exist: {quote_path(source)}") from exc
     except PermissionError as exc:
         log_event(
             LOGGER,
@@ -147,8 +143,7 @@ def _validate_source_directory(source: Path) -> None:
             source=source,
             reason="permission-denied-or-sandboxed",
             action=(
-                "check directory traversal permissions and the generated systemd "
-                "filesystem sandbox"
+                "check directory traversal permissions and the generated systemd filesystem sandbox"
             ),
         )
         raise ExecutionError(

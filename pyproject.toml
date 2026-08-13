@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "stream-archiver"
-version = "0.3.4"
+version = "0.3.4b1"
 description = "Policy-driven safe movement of complete, old filesystem streams."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -27,6 +27,7 @@ stream-archiver = "stream_archiver.cli:main"
 dev = [
   "coverage>=7.6",
   "pytest>=8.3",
+  "ruff>=0.12",
 ]
 
 [tool.setuptools]
@@ -53,3 +54,7 @@ source = ["stream_archiver"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
