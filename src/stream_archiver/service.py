@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from stream_archiver.config import Policy
 from stream_archiver.discovery import discover_entries
+from stream_archiver.errors import RecoveryError
+from stream_archiver.locking import resource_locks
 from stream_archiver.executor import (
     MANIFEST_NAME,
     ArchiveExecutionResult,
@@ -20,12 +24,16 @@ from stream_archiver.executor import (
 from stream_archiver.model import ArchivePlan
 from stream_archiver.observability import log_event
 from stream_archiver.planning import (
+    boundary_entries_for_policy,
     build_archive_plan,
     select_eligible_streams,
     split_streams,
 )
 
 LOGGER = logging.getLogger(__name__)
+_ARCHIVE_NAME_PATTERN = re.compile(
+    r"^\d{8}T\d{6}\.\d{6}Z--\d{8}T\d{6}\.\d{6}Z--[0-9a-f]{10}$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +105,8 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
     source_plans: list[SourcePlan] = []
     for source_index, source in enumerate(policy.sources, start=1):
         entries = discover_entries(source)
-        streams = split_streams(entries, minimum_gap=policy.stream_gap)
+        boundary_entries = boundary_entries_for_policy(policy, entries)
+        streams = split_streams(boundary_entries, minimum_gap=policy.stream_gap)
         eligible = select_eligible_streams(
             streams,
             now=now,
@@ -106,7 +115,15 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
         plans = tuple(
             plan
             for stream in eligible
-            if (plan := build_archive_plan(policy, source, stream)) is not None
+            if (
+                plan := build_archive_plan(
+                    policy,
+                    source,
+                    stream,
+                    source_entries=entries,
+                )
+            )
+            is not None
         )
         log_event(
             LOGGER,
@@ -145,8 +162,28 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
     return result
 
 
-def run_policy(policy: Policy, *, now: datetime) -> PolicyRunResult:
-    """Recover pending cleanup, then execute every source-local eligible stream."""
+def run_policy(
+    policy: Policy,
+    *,
+    now: datetime,
+    resources_locked: bool = False,
+    event_clock: Callable[[], datetime] | None = None,
+) -> PolicyRunResult:
+    """Recover pending cleanup, then execute every source-local eligible stream.
+
+    Direct library callers receive the same cooperative resource locking as the
+    CLI. ``resources_locked`` is for the CLI scheduler, which already owns a
+    superset lock while it updates due state.
+    """
+
+    if not resources_locked:
+        with resource_locks((*policy.sources, policy.destination), exclusive=True):
+            return run_policy(
+                policy,
+                now=now,
+                resources_locked=True,
+                event_clock=event_clock,
+            )
 
     log_event(
         LOGGER,
@@ -160,7 +197,11 @@ def run_policy(policy: Policy, *, now: datetime) -> PolicyRunResult:
     recovered = tuple(
         archive
         for source in policy.sources
-        for archive in recover_pending_archives(policy.destination, source, now=now)
+        for archive in recover_pending_archives(
+            policy.destination,
+            source,
+            event_clock=event_clock,
+        )
     )
     plan = plan_policy(policy, now=now)
     archives_list: list[ArchiveExecutionResult] = []
@@ -174,7 +215,7 @@ def run_policy(policy: Policy, *, now: datetime) -> PolicyRunResult:
             archive=item.archive_name,
             archive_progress=f"{index}/{len(plan.archive_plans)}",
         )
-        archives_list.append(execute_plan(item, now=now))
+        archives_list.append(execute_plan(item, event_clock=event_clock))
     archives = tuple(archives_list)
     log_event(
         LOGGER,
@@ -193,12 +234,49 @@ def run_policy(policy: Policy, *, now: datetime) -> PolicyRunResult:
     )
 
 
-def verify_destination(destination: Path) -> tuple[ArchiveVerificationResult, ...]:
+def verify_policies(
+    policies: tuple[Policy, ...],
+    *,
+    all_in_destination: bool = False,
+    resources_locked: bool = False,
+) -> tuple[ArchiveVerificationResult, ...]:
+    """Verify archives for selected policy ownership or audit selected destinations."""
+
+    if not resources_locked:
+        resources = {policy.destination for policy in policies}
+        with resource_locks(resources, exclusive=False):
+            return verify_policies(
+                policies,
+                all_in_destination=all_in_destination,
+                resources_locked=True,
+            )
+
+    destinations = sorted({policy.destination for policy in policies}, key=str)
+    results: list[ArchiveVerificationResult] = []
+    for destination in destinations:
+        owners = None
+        if not all_in_destination:
+            owners = {
+                (policy.name, str(source))
+                for policy in policies
+                if policy.destination == destination
+                for source in policy.sources
+            }
+        results.extend(verify_destination(destination, owners=owners))
+    return tuple(results)
+
+
+def verify_destination(
+    destination: Path,
+    *,
+    owners: set[tuple[str, str]] | None = None,
+) -> tuple[ArchiveVerificationResult, ...]:
     """Verify every archive directory under one destination root.
 
-    This function intentionally operates at destination scope because several
-    policies may share that root. Directories without a manifest and the
-    internal staging directory are ignored.
+    ``owners`` contains ``(policy_name, source_root)`` pairs for policy-scoped
+    verification. ``None`` performs a destination-wide audit. Archive-shaped
+    directories with missing manifests are always reported because their
+    ownership cannot be established safely.
     """
 
     log_event(
@@ -209,24 +287,31 @@ def verify_destination(destination: Path) -> tuple[ArchiveVerificationResult, ..
         destination=destination,
     )
     if not destination.exists():
-        log_event(
-            LOGGER,
-            logging.INFO,
-            "destination_verification_completed",
-            "destination does not exist; no archives were verified",
-            destination=destination,
-            archives=0,
-        )
-        return ()
+        raise RecoveryError(f"archive destination does not exist: {destination}")
+    if destination.is_symlink() or not destination.is_dir():
+        raise RecoveryError(f"archive destination is not a real directory: {destination}")
     results: list[ArchiveVerificationResult] = []
-    candidates = [
-        child
-        for child in sorted(destination.iterdir())
-        if child.name != ".stream-archiver-staging"
-        and not child.is_symlink()
-        and child.is_dir()
-        and (child / MANIFEST_NAME).is_file()
-    ]
+    candidates: list[Path] = []
+    for child in sorted(destination.iterdir()):
+        if child.name == ".stream-archiver-staging" or child.is_symlink() or not child.is_dir():
+            continue
+        manifest_path = child / MANIFEST_NAME
+        archive_shaped = _ARCHIVE_NAME_PATTERN.fullmatch(child.name) is not None
+        if not manifest_path.is_file():
+            if archive_shaped:
+                raise RecoveryError(f"archive-shaped directory is missing {MANIFEST_NAME}: {child}")
+            continue
+        if owners is not None:
+            import json
+
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RecoveryError(f"cannot read archive manifest {manifest_path}: {exc}") from exc
+            owner = (manifest.get("policy_name"), manifest.get("source_root"))
+            if owner not in owners:
+                continue
+        candidates.append(child)
     for index, child in enumerate(candidates, start=1):
         log_event(
             LOGGER,

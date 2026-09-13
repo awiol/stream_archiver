@@ -1,28 +1,49 @@
 # Operations guide
 
-## Pre-deployment checks
+## Pre-deployment contract
 
-1. Create a user-owned policy file from `examples/config/policies.toml`.
-2. Ensure every source and destination directory already exists.
-3. Ensure the service account can traverse, read, and delete from sources and
-   can create files in destinations.
-4. Confirm destination free space. Safe movement temporarily retains both
-   source and destination copies.
-5. Review the read-only plan. `plan` also loads and validates the policy:
+Before destructive or scheduled operation:
+
+1. Create and review a user-owned policy file.
+2. Ensure every configured source and destination root already exists as a real
+   directory.
+3. Ensure the service account can traverse/read/delete from sources and create
+   archive objects in destinations.
+4. Confirm destination free space. A staged logical move temporarily retains
+   both source and destination representations.
+5. Ensure producers will not continue modifying entries selected for cleanup.
+6. Review a read-only plan.
 
 ```bash
 stream-archiver --config /path/to/policies.toml plan
 ```
 
-After installation to the default `/etc/stream-archiver/policies.toml`, the
-`--config` option can be omitted for manual commands. For per-user operation,
-set `STREAM_ARCHIVER_CONFIG` once or place the policy under the XDG configuration
-directory.
+The timestamp-gap rule is a heuristic, not a producer-completion protocol.
+
+## Development and local verification
+
+For a locked `uv` development environment:
+
+```bash
+./tools/bootstrap-dev.sh --python-version 3.11
+```
+
+For source verification without downloads:
+
+```bash
+./tools/verify-local.sh
+```
+
+For the additional wheel/install surface:
+
+```bash
+./tools/verify-local.sh --release
+```
+
+If Ruff is unavailable, the verification script reports that fact. It does not
+convert an unavailable lint gate into a pass.
 
 ## Recommended installation
-
-Use the guided installer from the source checkout or an extracted release
-bundle:
 
 ```bash
 sudo UV_BIN="$(command -v uv)" \
@@ -30,125 +51,126 @@ sudo UV_BIN="$(command -v uv)" \
   --config /absolute/path/to/policies.toml
 ```
 
-Passing `UV_BIN` explicitly avoids depending on root's `PATH` when `uv` is
-installed only for the invoking user. The installer must use a Python version
-compatible with the package requirement instead of assuming that the operating
-system's `python3` command is sufficiently new.
-
-A checkout can contain several wheels. The installer prefers a wheel matching
-the current project version. If no matching wheel is present, it selects the
-newest candidate and warns. When release checksum evidence contains an entry for
-the selected wheel, the installer verifies it and rejects a mismatch. A missing
-checksum file or missing wheel entry is a warning, not an installation blocker.
-
-The installer protects an existing deployed policy before making system changes,
-installs into a stable application path, validates the read-only plan as the
-service user, generates units from the actual deployment paths, verifies the
-units, and reloads systemd. It does not start archival work or enable the timer.
-Use `--help` for the options supported by the installed revision.
-
-For an existing installation, use `render-systemd` directly. The generated
-`INSTALL.md` is the deployment checklist for those resolved paths.
+The installer defaults to Python 3.11 and accepts `--python-version` for another
+declared supported version. It protects an existing installed policy, installs
+into the stable application path, validates policy/plan as the service user,
+generates deployment-specific units, verifies them, and reloads systemd. It does
+not start the mover or enable the timer.
 
 ## First-run gate
 
-Run the read-only plan as the service account, then perform one manual service
-run:
+Run the read-only plan as the service account:
 
 ```bash
-sudo -u stream-archiver \
-  /opt/stream-archiver/venv/bin/stream-archiver plan
+sudo -u stream-archiver /opt/stream-archiver/venv/bin/stream-archiver plan
+```
 
+Then run the generated service once and inspect its status/logs:
+
+```bash
 sudo systemctl start stream-archiver.service
 sudo systemctl status stream-archiver.service
 journalctl -u stream-archiver.service -n 200 --no-pager
 ```
 
-Only enable the timer after the service exits successfully and the resulting
-archives pass verification:
+Verify the resulting archives before enabling recurrence:
 
 ```bash
 /opt/stream-archiver/venv/bin/stream-archiver verify
 sudo systemctl enable --now stream-archiver.timer
 ```
 
-## Logs
+## Time and verification surfaces
 
-Normal scheduled operation uses `INFO` text logs in journald. Follow progress:
+`plan --at <ISO-8601>` is the only public artificial-time surface. `run` and
+`run-if-due` use the observed execution clock.
+
+`verify` checks only archives whose manifest ownership matches the selected
+policy/source roots, except that archive-shaped candidates with missing
+ownership evidence are reported as malformed. To audit every recognized archive
+under selected destination roots, use:
+
+```bash
+stream-archiver verify --all-in-destination
+```
+
+## Locks and concurrent producers
+
+Stream Archiver uses advisory hierarchical filesystem-resource locks. Nested
+resources contend across cooperating Stream Archiver processes. `verify` uses
+shared locks; destructive operation uses exclusive mutation-root locks.
+
+The lock protocol does not control unrelated producer processes. A producer that
+keeps writing an already-open inode after final validation, or replaces the
+selected pathname between validation and unlink, is outside the safe-deletion
+precondition. Use an external producer completion or coordination protocol when
+that behavior is possible.
+
+`--lock-file` is retained only as a deprecated 0.3 migration option and is
+ignored by the 0.4 safety lock domain.
+
+## Logs and progress
+
+Operational logs go to stderr/journald and machine-readable command results stay
+on stdout. Every CLI invocation has a `run_id`.
+
+Useful fields include `phase`, `operation`, `outcome`, `policy_name`,
+`source_root`, `source_path`, `destination_root`, `archive_name`,
+`archive_directory`, and `plan_id` where applicable. Older compatibility events
+may retain additional fields.
+
+`staging_percent=100` means payload staging is complete; it does not mean the
+transaction is complete. `transaction_percent=100` is emitted only after source
+cleanup persistence, final verification, and completion evidence.
 
 ```bash
 journalctl -u stream-archiver.service -f
-```
-
-Show warnings and errors:
-
-```bash
 journalctl -u stream-archiver.service -p warning..alert
 ```
 
-Temporarily use debug logging by regenerating the unit with
-`--service-log-level DEBUG`, reviewing the generated diff, reinstalling it, and
-running `systemctl daemon-reload`. Debug logs include more paths, plan decisions,
-and verification milestones; they do not include file contents.
+## Failure states and recovery
 
-Important progress fields include:
+Exit status 2 is an expected configuration/planning/locking/execution/recovery
+or verification failure. Exit status 1 is an unexpected internal failure. Exit
+status 130 is operator interruption.
 
-- `policy_progress`, `source_progress`, `archive_progress`;
-- `action_progress`, `cleanup_progress`, `payload_progress`;
-- `file_bytes`, `overall_bytes`, `percent`, and `overall_percent`; and
-- archive, source, operation, and evidence-hash fields.
+A committed archive with `cleanup_complete: false` is a pending transaction.
+Recovery first verifies the committed payload and checksum evidence. If that
+verification fails, recovery stops before deleting any remaining source entry.
+If some cleanup occurred before interruption, recovery reconciles missing versus
+still-present source entries and continues only when remaining preconditions
+hold.
 
-Text log string values are quoted. This keeps paths with whitespace visually
-separate from adjacent fields.
+Do not edit a manifest to force cleanup after a source conflict. Preserve the
+available copies and resolve the conflict explicitly.
 
-## Completion criteria
+## Durability boundary
 
-A current archive is complete only when:
+Completion requires successful synchronization of the required payload metadata,
+archive namespace, source cleanup directories, final manifest, and completion
+evidence. A synchronization failure before cleanup preserves source entries. A
+failure after partial cleanup leaves the archive incomplete; it must not receive
+completion evidence.
 
-- `MANIFEST.json` has `cleanup_complete: true`;
-- every regular payload matches its archived SHA-256;
-- compressed payloads decompress to their source SHA-256;
-- `SHA256SUMS.json` matches the manifest and recorded hash; and
-- `SUCCESS.json` references the current final manifest and checksum-index
-  hashes.
+This contract is bounded to the local-Linux-filesystem assumptions in
+`docs/requirements.md`. Validate other filesystem/storage types separately.
 
-The `verify` command checks these conditions without changing files.
+## Upgrading from 0.3
 
-## Diagnosing failures
+1. Install the new package into the stable environment.
+2. Run `plan` and inspect differences.
+3. Regenerate systemd files; 0.3 units contain obsolete condition/lock-file
+   semantics.
+4. Review the generated unit diff and run `systemd-analyze verify`.
+5. Perform one manual service run and `verify` before enabling the timer.
 
-Exit status 2 indicates an expected configuration, planning, locking, execution,
-recovery, or verification failure. The final `operation_failed` log includes a
-corrective action. Exit status 1 indicates an unexpected internal failure and
-retains a traceback for defect reporting. Exit status 130 indicates operator
-interruption.
-
-A committed archive with `cleanup_complete: false` is incomplete. Correct the
-reported source or permission problem and rerun the policy. Recovery validates
-remaining source identities before deletion.
-
-If a read-only plan succeeds for the service user but systemd reports that a
-source is inaccessible, regenerate the unit from the current configuration and
-inspect its sandbox. The generator disables `ProtectHome` when a required policy,
-source, or destination path is under `/home`, `/root`, or `/run/user`; otherwise
-it keeps that protection enabled.
-
-Do not edit a manifest to force deletion after a source was intentionally
-changed. Preserve both copies and resolve the conflict manually.
-
-## Configuration or package upgrades
-
-1. Install the new package into the stable virtual environment.
-2. Run `plan` and review the result.
-3. Regenerate systemd files with `--force`.
-4. Review the generated-unit diff.
-5. Install both units and run `systemctl daemon-reload`.
-6. Perform a manual service run and verification before resuming the timer.
-
-Regeneration is required when source paths, destinations, policy path,
-executable path, service identity, schedule, or service log options change.
+Completed supported 0.3 archives remain verifiable. Valid v1 scheduling state is
+readable but affected policies are due until a successful v2 fingerprinted state
+record is written. Pending supported 0.3 cleanup uses the corrected
+verify-before-delete recovery ordering.
 
 ## Restore
 
-Automatic restore is outside scope. The manifest records original relative
-paths, modes, mtimes, actions, link text, hashes, and codec. Verify hashes before
-placing restored files into use. Test restore procedures on non-production data.
+Automatic restore is outside scope. Verify archive integrity before manually
+placing archived content back into operational use. Test restoration procedures
+on non-production data.

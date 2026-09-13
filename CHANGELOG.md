@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0a1 — 2026-09-13
+
+- Reordered normal and recovery cleanup so the final committed archive payload
+  and checksum evidence are verified before any dependent source deletion.
+- Added bounded durability helpers that synchronize final payload metadata,
+  staging/destination namespaces, and source cleanup directories; synchronization
+  failures cannot be converted into completed transactions.
+- Moved symlink alias classification ahead of stream segmentation so an alias
+  follows its selected target even when the alias timestamp is in another time
+  stream; archive names now use payload-producing timestamp bounds.
+- Removed the destructive global `--now` interface and added read-only
+  `plan --at`; execution/evidence state uses observed execution time.
+- Added policy-scoped verification, explicit `verify --all-in-destination`, and
+  malformed archive-shaped directory detection.
+- Replaced invocation lock-file coordination with cooperative hierarchical
+  shared/exclusive filesystem-resource locks. Legacy `--lock-file` is accepted
+  only as a deprecated, ignored migration option.
+- Migrated due state to format v2 with policy fingerprints. Valid v1 state is
+  readable but conservatively due until a successful v2 completion.
+- Added invocation `run_id`, phase-aware completion/staging progress, and
+  corrected source-cleanup log wording.
+- Removed systemd operational `ConditionPath...` gates, changed home protection
+  to `ProtectHome=read-only` with generated writable exceptions, and removed the
+  obsolete generated lock-file argument.
+- Added repository requirements, revised design, safety/compatibility/fault and
+  hierarchical-lock regression tests, and local `uv` bootstrap/verification
+  tooling. The installer now defaults to the declared Python 3.11 support floor.
+- Scope the durability/safe-deletion claim to the documented local-Linux
+  filesystem and producer-quiescence preconditions; the project is still not a
+  backup, snapshot, authenticity, or automatic-restore system.
+
 ## 0.3.4b1 — 2026-08-13
 
 - Promoted the 0.3.4 line to beta after the logging, deployment, path-diagnostic,

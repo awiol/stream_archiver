@@ -40,6 +40,7 @@ def test_policy_run_logs_action_and_byte_progress(tmp_path: Path) -> None:
     configure_logging(level="DEBUG", format_name="json", stream=output)
     source = tmp_path / "source"
     destination = tmp_path / "archive"
+    destination.mkdir()
     write_at(source / "large.bin", b"x" * (3 * 1024 * 1024), NOW - timedelta(days=40))
     policy = Policy(
         name="reports",
@@ -64,11 +65,14 @@ def test_policy_run_logs_action_and_byte_progress(tmp_path: Path) -> None:
     progress = next(event for event in events if event["event"] == "archive_action_progress")
     assert progress["action_progress"] == "1/1"
     assert progress["file_bytes"].endswith(f"/{3 * 1024 * 1024}")
-    assert progress["overall_bytes"].endswith(f"/{3 * 1024 * 1024}")
-    assert 0 < progress["overall_percent"] < 100
-    completed = next(event for event in events if event["event"] == "archive_action_completed")
-    assert completed["percent"] == 100
-    assert completed["overall_percent"] == 100
+    assert progress["staging_bytes"].endswith(f"/{3 * 1024 * 1024}")
+    assert progress["staging_percent"] < 100
+    completed = next(event for event in events if event["event"] == "archive_execution_completed")
+    assert completed["transaction_percent"] == 100
+    assert 0 < progress["staging_percent"] < 100
+    staged = next(event for event in events if event["event"] == "archive_action_completed")
+    assert staged["percent"] == 100
+    assert staged["staging_percent"] == 100
 
 
 def test_cli_failure_log_is_actionable_and_stdout_remains_empty(
@@ -96,6 +100,39 @@ def test_cli_failure_log_is_actionable_and_stdout_remains_empty(
     assert captured.out == ""
     assert events[-1]["event"] == "operation_failed"
     assert "action" in events[-1]
+
+
+def test_cli_json_events_share_one_run_id(tmp_path: Path, capsys: object) -> None:
+    """R-LOG-002: one CLI invocation can be correlated across all emitted events."""
+
+    from stream_archiver.cli import main
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    config = tmp_path / "policies.toml"
+    config.write_text(
+        (
+            "schema_version = 2\n"
+            "[[policies]]\n"
+            'name = "reports"\n'
+            f'sources = ["{source}"]\n'
+            f'destination = "{destination}"\n'
+            'minimum_age = "30d"\n'
+            'stream_gap = "8h"\n'
+            'symlink_rule = "ignore"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["--config", str(config), "--log-format", "json", "check"]) == 0
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    run_ids = {event["run_id"] for event in events}
+
+    assert len(run_ids) == 1
+    assert len(next(iter(run_ids))) == 32
 
 
 def test_text_logging_quotes_paths_and_other_string_fields() -> None:

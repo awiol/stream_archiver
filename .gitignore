@@ -10,10 +10,11 @@ build/
 dist/
 /SHA256SUMS
 .verification-dist/
+.verification-install/
+.verification-tests/
 .verification-venv/
 
 SHA256SUMS
-docs/verification.md
 .dist/
 .idea/
 

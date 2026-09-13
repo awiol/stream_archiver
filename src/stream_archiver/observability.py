@@ -11,12 +11,23 @@ import json
 import logging
 import os
 import sys
+import uuid
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
 _DEFAULT_EVENT = "message"
 _STANDARD_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
+_RUN_ID: ContextVar[str | None] = ContextVar("stream_archiver_run_id", default=None)
+
+
+def start_run_context() -> str:
+    """Create and install one correlation identifier for the current invocation."""
+
+    run_id = uuid.uuid4().hex
+    _RUN_ID.set(run_id)
+    return run_id
 
 
 class _DynamicStderrHandler(logging.StreamHandler):
@@ -118,10 +129,14 @@ def log_event(
     other objects are converted to strings by the formatters.
     """
 
+    context_fields = dict(fields)
+    run_id = _RUN_ID.get()
+    if run_id is not None:
+        context_fields.setdefault("run_id", run_id)
     logger.log(
         level,
         message,
-        extra={"event": event, "event_fields": fields},
+        extra={"event": event, "event_fields": context_fields},
         stacklevel=2,
     )
 

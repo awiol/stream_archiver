@@ -13,16 +13,16 @@ from pathlib import Path
 
 from stream_archiver.config import AppConfig, Policy, load_config
 from stream_archiver.errors import ConfigurationError, StreamArchiverError
-from stream_archiver.locking import execution_lock
-from stream_archiver.observability import configure_logging, log_event
+from stream_archiver.locking import resource_locks
+from stream_archiver.observability import configure_logging, log_event, start_run_context
 from stream_archiver.service import (
     PolicyPlan,
     PolicyRunResult,
     plan_policy,
     run_policy,
-    verify_destination,
+    verify_policies,
 )
-from stream_archiver.state import load_state, save_state
+from stream_archiver.state import load_state, policy_fingerprint, save_state
 from stream_archiver.systemd import render_systemd_bundle, resolve_current_executable
 
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     log_level = "DEBUG" if arguments.verbose else arguments.log_level
     configure_logging(level=log_level, format_name=arguments.log_format)
+    run_id = start_run_context()
 
     try:
         config_path = _resolve_config_path(arguments.config)
@@ -47,12 +48,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=arguments.command,
             config=config_path,
             selected_policies=arguments.policy,
+            run_id=run_id,
         )
         config = load_config(config_path)
         policies = _select_policies(config, arguments.policy)
-        now = _parse_now(arguments.now)
         if arguments.command == "run-if-due" and arguments.state is None:
             arguments.state = _default_state_file()
+        if arguments.command == "run-if-due":
+            arguments.state.parent.mkdir(parents=True, exist_ok=True)
         log_event(
             LOGGER,
             logging.INFO,
@@ -74,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if arguments.command == "plan":
+            now = _parse_planning_time(arguments.at)
             plans = [plan_policy(policy, now=now) for policy in policies]
             _print_json([_plan_summary(plan) for plan in plans])
             log_event(
@@ -87,18 +91,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if arguments.command == "verify":
-            destinations = sorted({policy.destination for policy in policies})
-            results = [
-                result for destination in destinations for result in verify_destination(destination)
-            ]
+            results = list(
+                verify_policies(
+                    policies,
+                    all_in_destination=arguments.all_in_destination,
+                )
+            )
             _print_json([_verification_summary(result) for result in results])
             log_event(
                 LOGGER,
                 logging.INFO,
                 "verification_completed",
                 "destination verification completed",
-                destination_count=len(destinations),
+                destination_count=len({policy.destination for policy in policies}),
                 archive_count=len(results),
+                all_in_destination=arguments.all_in_destination,
             )
             return 0
         if arguments.command == "render-systemd":
@@ -135,10 +142,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
-        lock_file = arguments.lock_file or _default_lock_file(arguments)
-        with execution_lock(lock_file):
+        if arguments.lock_file is not None:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "legacy_lock_file_ignored",
+                "--lock-file is deprecated and does not define the 0.4 resource lock domain",
+                path=arguments.lock_file,
+                operation="lock",
+                outcome="ignored",
+            )
+        resources = _policy_resources(
+            policies,
+            state_path=arguments.state if arguments.command == "run-if-due" else None,
+        )
+        with resource_locks(resources, exclusive=True):
             if arguments.command == "run":
-                results = [run_policy(policy, now=now) for policy in policies]
+                now = datetime.now(UTC)
+                results = [
+                    run_policy(policy, now=now, resources_locked=True) for policy in policies
+                ]
                 _print_json([_run_summary(result) for result in results])
                 log_event(
                     LOGGER,
@@ -150,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if arguments.command == "run-if-due":
+                now = datetime.now(UTC)
                 return _run_if_due(config, policies, arguments.state, now)
     except KeyboardInterrupt:
         log_event(
@@ -186,7 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stream-archiver",
-        description="Safely move complete old filesystem streams using declarative policies.",
+        description="Archive complete old filesystem streams using declarative policies.",
     )
     parser.add_argument(
         "--config",
@@ -201,10 +225,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="run only this policy name; may be repeated",
-    )
-    parser.add_argument(
-        "--now",
-        help="explicit ISO-8601 time for reproducible planning; defaults to current UTC",
     )
     parser.add_argument(
         "--log-level",
@@ -226,8 +246,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check", help="validate configuration")
-    subparsers.add_parser("plan", help="show eligible streams without modifying files")
-    subparsers.add_parser("verify", help="recompute archive hashes and success evidence")
+    plan = subparsers.add_parser("plan", help="show eligible streams without modifying files")
+    plan.add_argument(
+        "--at",
+        help="read-only ISO-8601 planning reference time; defaults to current UTC",
+    )
+    verify = subparsers.add_parser("verify", help="recompute archive hashes and success evidence")
+    verify.add_argument(
+        "--all-in-destination",
+        action="store_true",
+        help="audit all archive-shaped directories under selected destination roots",
+    )
 
     run = subparsers.add_parser("run", help="run selected policies immediately")
     run.add_argument("--lock-file", type=Path)
@@ -278,7 +307,13 @@ def _run_if_due(
     state = load_state(state_path)
     summaries: list[dict[str, object]] = []
     for index, policy in enumerate(policies, start=1):
-        due = state.is_due(policy.name, now=now, interval=config.run_interval)
+        fingerprint = policy_fingerprint(policy)
+        due = state.is_due(
+            policy.name,
+            now=now,
+            interval=config.run_interval,
+            fingerprint=fingerprint,
+        )
         log_event(
             LOGGER,
             logging.INFO,
@@ -291,8 +326,8 @@ def _run_if_due(
         if not due:
             summaries.append({"policy": policy.name, "status": "not-due"})
             continue
-        result = run_policy(policy, now=now)
-        state = state.with_success(policy.name, when=now)
+        result = run_policy(policy, now=now, resources_locked=True)
+        state = state.with_success(policy.name, when=datetime.now(UTC), fingerprint=fingerprint)
         save_state(state_path, state)
         summary = _run_summary(result)
         summary["status"] = "completed"
@@ -355,16 +390,37 @@ def _select_policies(config: AppConfig, selected: list[str]) -> tuple[Policy, ..
     return policies
 
 
-def _parse_now(value: str | None) -> datetime:
+def _parse_planning_time(value: str | None) -> datetime:
     if value is None:
         return datetime.now(UTC)
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
-        raise ConfigurationError("--now must be a valid ISO-8601 timestamp") from exc
+        raise ConfigurationError("--at must be a valid ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ConfigurationError("--now must include a UTC offset")
+        raise ConfigurationError("--at must include a UTC offset")
     return parsed.astimezone(UTC)
+
+
+def _policy_resources(
+    policies: tuple[Policy, ...],
+    *,
+    state_path: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return canonical resources that one destructive invocation can mutate.
+
+    Scheduled execution includes the due-state parent directory so two
+    invocations that use the same state store cannot perform a lost-update
+    read/modify/write sequence while otherwise operating on disjoint policies.
+    """
+
+    resources = {
+        *(source for policy in policies for source in policy.sources),
+        *(policy.destination for policy in policies),
+    }
+    if state_path is not None:
+        resources.add(state_path.parent.resolve(strict=True))
+    return tuple(sorted(resources, key=str))
 
 
 def _default_state_file() -> Path:
@@ -376,12 +432,6 @@ def _default_state_file() -> Path:
     xdg_state_home = os.environ.get("XDG_STATE_HOME")
     root = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
     return root / "stream-archiver" / "state.json"
-
-
-def _default_lock_file(arguments: argparse.Namespace) -> Path:
-    if arguments.command == "run-if-due":
-        return arguments.state.with_name(arguments.state.name + ".lock")
-    return _default_state_file().with_name("execution.lock")
 
 
 def _config_summary(config: AppConfig) -> dict[str, object]:
@@ -425,8 +475,10 @@ def _plan_summary(plan: PolicyPlan) -> dict[str, object]:
                     {
                         "archive_name": item.archive_name,
                         "plan_id": item.plan_id,
-                        "oldest_mtime_ns": item.stream.oldest_mtime_ns,
-                        "newest_mtime_ns": item.stream.newest_mtime_ns,
+                        "selection_oldest_mtime_ns": item.stream.oldest_mtime_ns,
+                        "selection_newest_mtime_ns": item.stream.newest_mtime_ns,
+                        "payload_oldest_mtime_ns": item.payload_oldest_mtime_ns,
+                        "payload_newest_mtime_ns": item.payload_newest_mtime_ns,
                         "actions": [
                             {
                                 "source": action.source.relative_path.as_posix(),

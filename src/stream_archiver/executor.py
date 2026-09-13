@@ -17,6 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from stream_archiver.durability import (
+    sync_directories,
+    sync_directory,
+    sync_regular_file,
+    sync_tree_directories,
+)
 from stream_archiver.errors import ExecutionError, RecoveryError
 from stream_archiver.model import (
     ActionKind,
@@ -109,9 +115,9 @@ class _FileProgress:
                 source=self.source_path,
                 action_progress=f"{self.action_index}/{self.action_total}",
                 file_bytes=f"{self.completed}/{self.file_size}",
-                overall_bytes=f"{overall}/{self.overall_total}",
+                staging_bytes=f"{overall}/{self.overall_total}",
                 percent=percent,
-                overall_percent=_percentage(overall, self.overall_total),
+                staging_percent=_percentage(overall, self.overall_total),
             )
             self.next_debug_percent = percent + 1
         if percent >= self.next_info_percent and percent < 100:
@@ -124,9 +130,9 @@ class _FileProgress:
                 source=self.source_path,
                 action_progress=f"{self.action_index}/{self.action_total}",
                 file_bytes=f"{self.completed}/{self.file_size}",
-                overall_bytes=f"{overall}/{self.overall_total}",
+                staging_bytes=f"{overall}/{self.overall_total}",
                 percent=percent,
-                overall_percent=_percentage(overall, self.overall_total),
+                staging_percent=_percentage(overall, self.overall_total),
             )
             self.next_info_percent = ((percent // 10) + 1) * 10
 
@@ -139,17 +145,21 @@ def _percentage(completed: int, total: int) -> int:
     return min(100, completed * 100 // total)
 
 
-def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
-    """Safely move one source stream into a committed archive directory.
+def execute_plan(
+    plan: ArchivePlan,
+    *,
+    event_clock: Callable[[], datetime] | None = None,
+) -> ArchiveExecutionResult:
+    """Execute one staged move transaction for a source stream.
 
     An uncompressed move is implemented as a verified copy into destination
     staging, an atomic destination-side commit, source revalidation, and source
-    deletion. Compression follows the same transaction. Source deletion never
-    starts before every payload and its SHA-256 evidence are durable in the
-    committed archive.
+    deletion. Compression follows the same transaction. The supported
+    durability boundary is defined in the project requirements and depends on
+    successful local-filesystem synchronization operations.
     """
 
-    now_utc = _require_aware_utc(now)
+    clock = event_clock or _observed_utc_now
     log_event(
         LOGGER,
         logging.INFO,
@@ -171,7 +181,7 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             manifest = _read_manifest(final_directory / MANIFEST_NAME, RecoveryError)
             _validate_plan_manifest_match(plan, manifest, final_directory)
             if manifest.get("cleanup_complete") is not True:
-                _recover_manifest(final_directory, manifest, completed_at=now_utc)
+                _recover_manifest(final_directory, manifest, event_clock=clock)
             elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
                 _ensure_success_evidence(final_directory, manifest)
             result = _result_from_manifest(final_directory, manifest)
@@ -199,12 +209,12 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             archive=plan.archive_name,
             staging=staging_directory,
         )
-        manifest = _stage_plan(plan, staging_directory, now_utc)
+        manifest = _stage_plan(plan, staging_directory, _require_aware_utc(clock()))
         _write_manifest(staging_directory / MANIFEST_NAME, manifest)
-        _fsync_directory(staging_directory)
+        sync_tree_directories(staging_directory)
         os.replace(staging_directory, final_directory)
         staging_directory = None
-        _fsync_directory(plan.destination_root)
+        sync_directory(plan.destination_root)
         log_event(
             LOGGER,
             logging.INFO,
@@ -212,6 +222,17 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             "verified staging directory committed atomically",
             archive=final_directory,
             entries=len(manifest["entries"]),
+        )
+
+        _verify_committed_pending_archive(final_directory, manifest)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "committed_archive_verified",
+            "committed archive verified before source cleanup",
+            phase="committed_verification",
+            archive_directory=final_directory,
+            plan_id=plan.plan_id,
         )
 
         log_event(
@@ -223,11 +244,13 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             source=plan.source_root,
         )
         _validate_all_sources(manifest, plan.source_root)
-        _remove_sources(manifest, plan.source_root)
+        cleanup_directories = _remove_sources(manifest, plan.source_root)
+        sync_directories(cleanup_directories)
+        removed_directory_parents = _remove_empty_source_directories(plan.source_root)
+        sync_directories(removed_directory_parents)
         manifest["cleanup_complete"] = True
-        manifest["cleanup_completed_at"] = _format_utc(now_utc)
+        manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(clock()))
         _write_manifest(final_directory / MANIFEST_NAME, manifest)
-        _remove_empty_source_directories(plan.source_root)
         _ensure_success_evidence(final_directory, manifest)
         result = _result_from_manifest(final_directory, manifest)
         log_event(
@@ -238,6 +261,9 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             archive=final_directory,
             moved_files=result.moved_files,
             success_evidence=result.success_evidence,
+            transaction_percent=100,
+            phase="completed",
+            outcome="success",
         )
         return result
     except (ExecutionError, RecoveryError):
@@ -247,9 +273,11 @@ def execute_plan(plan: ArchivePlan, *, now: datetime) -> ArchiveExecutionResult:
             LOGGER,
             logging.ERROR,
             "archive_execution_failed",
-            "archive transaction failed; source cleanup was not advanced",
+            "archive transaction failed before completion; "
+            "reconcile committed archive and source state",
             archive=plan.archive_name,
             source=plan.source_root,
+            retry_safe="inspect pending archive and remaining sources before retry",
         )
         raise
     except OSError as exc:
@@ -262,11 +290,11 @@ def recover_pending_archives(
     destination_root: Path,
     source_root: Path,
     *,
-    now: datetime | None = None,
+    event_clock: Callable[[], datetime] | None = None,
 ) -> tuple[Path, ...]:
     """Resume cleanup and repair missing success evidence for one source root."""
 
-    completed_at = _require_aware_utc(now or datetime.now(UTC))
+    clock = event_clock or _observed_utc_now
     log_event(
         LOGGER,
         logging.INFO,
@@ -314,7 +342,7 @@ def recover_pending_archives(
                     archive=child,
                     source=source_root,
                 )
-                _recover_manifest(child, manifest, completed_at=completed_at)
+                _recover_manifest(child, manifest, event_clock=clock)
                 recovered.append(child)
             elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
                 _ensure_success_evidence(child, manifest)
@@ -449,8 +477,8 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
             operation=action.kind.value,
             action_progress=f"{index}/{len(plan.actions)}",
             source_bytes=(entry.identity.size if entry.kind is EntryKind.REGULAR else 0),
-            overall_bytes=f"{completed_bytes}/{total_bytes}",
-            overall_percent=_percentage(completed_bytes, total_bytes),
+            staging_bytes=f"{completed_bytes}/{total_bytes}",
+            staging_percent=_percentage(completed_bytes, total_bytes),
         )
         progress = _FileProgress(
             plan.archive_name,
@@ -478,9 +506,9 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
                 if entry.kind is EntryKind.REGULAR
                 else "0/0"
             ),
-            overall_bytes=f"{completed_bytes}/{total_bytes}",
+            staging_bytes=f"{completed_bytes}/{total_bytes}",
             percent=100,
-            overall_percent=_percentage(completed_bytes, total_bytes),
+            staging_percent=_percentage(completed_bytes, total_bytes),
         )
     checksums = _checksums_document(records)
     checksums_path = staging / CHECKSUMS_NAME
@@ -495,6 +523,10 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
         "archive_name": plan.archive_name,
         "stream_oldest_mtime_ns": plan.stream.oldest_mtime_ns,
         "stream_newest_mtime_ns": plan.stream.newest_mtime_ns,
+        "selection_oldest_mtime_ns": plan.stream.oldest_mtime_ns,
+        "selection_newest_mtime_ns": plan.stream.newest_mtime_ns,
+        "payload_oldest_mtime_ns": plan.payload_oldest_mtime_ns,
+        "payload_newest_mtime_ns": plan.payload_newest_mtime_ns,
         "created_at": _format_utc(now),
         "compression_level": COMPRESSION_LEVEL,
         "checksums_file": CHECKSUMS_NAME,
@@ -603,6 +635,7 @@ def _write_regular_payload(
     _assert_regular_identity(entry, after)
     os.chmod(destination, stat.S_IMODE(entry.identity.mode))
     os.utime(destination, ns=(entry.identity.mtime_ns, entry.identity.mtime_ns))
+    sync_regular_file(destination)
 
     archive_digest = _sha256_regular_file(destination)
     source_digest = source_hasher.hexdigest()
@@ -685,7 +718,10 @@ def _remove_sources(
     source_root: Path,
     *,
     error_type: type[ExecutionError | RecoveryError] = ExecutionError,
-) -> None:
+) -> set[Path]:
+    """Remove still-matching selected entries and return changed parent directories."""
+
+    changed_directories: set[Path] = set()
     records = [
         record
         for record in manifest["entries"]
@@ -703,8 +739,9 @@ def _remove_sources(
             LOGGER,
             logging.INFO,
             "source_cleanup_progress",
-            "removing verified source entry",
-            source=path,
+            "revalidating selected source entry before removal",
+            phase="source_revalidation",
+            source_path=path,
             cleanup_progress=f"{index}/{len(records)}",
         )
         if not os.path.lexists(path):
@@ -712,19 +749,31 @@ def _remove_sources(
         _validate_source_record(path, record, error_type=error_type)
         try:
             path.unlink()
+            changed_directories.add(path.parent)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "source_cleanup_entry_removed",
+                "selected source entry removed after revalidation",
+                phase="source_cleanup",
+                source_path=path,
+                cleanup_progress=f"{index}/{len(records)}",
+            )
         except OSError as exc:
             raise error_type(
                 f"archive committed but source cleanup failed for {path}: {exc}"
             ) from exc
+    return changed_directories
 
 
 def _recover_manifest(
     directory: Path,
     manifest: dict[str, Any],
     *,
-    completed_at: datetime,
+    event_clock: Callable[[], datetime],
 ) -> None:
     source_root = Path(manifest["source_root"])
+    _verify_committed_pending_archive(directory, manifest)
     for record in manifest["entries"]:
         action = ActionKind(record["action"])
         if action is ActionKind.SKIP_SYMLINK:
@@ -734,14 +783,42 @@ def _recover_manifest(
             continue
         _validate_source_record(source, record, error_type=RecoveryError)
 
-    _remove_sources(manifest, source_root, error_type=RecoveryError)
+    cleanup_directories = _remove_sources(
+        manifest,
+        source_root,
+        error_type=RecoveryError,
+    )
+    sync_directories(cleanup_directories)
+    removed_directory_parents = _remove_empty_source_directories(source_root)
+    sync_directories(removed_directory_parents)
     manifest["cleanup_complete"] = True
     if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
-        manifest["cleanup_completed_at"] = _format_utc(completed_at)
+        manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(event_clock()))
     _write_manifest(directory / MANIFEST_NAME, manifest)
-    _remove_empty_source_directories(source_root)
     if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
         _ensure_success_evidence(directory, manifest)
+
+
+def _verify_committed_pending_archive(
+    directory: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Verify a committed archive without requiring cleanup completion evidence.
+
+    This is the destructive-cleanup gate for both normal execution and recovery.
+    It intentionally verifies the final committed path rather than trusting the
+    earlier staging verification.
+    """
+
+    if directory.is_symlink() or not directory.is_dir():
+        raise RecoveryError(f"committed archive is not a real directory: {directory}")
+    manifest_path = directory / MANIFEST_NAME
+    on_disk = _read_manifest(manifest_path, RecoveryError)
+    if on_disk != manifest:
+        raise RecoveryError(f"committed archive manifest changed unexpectedly: {directory}")
+    _verify_archive_payloads(directory, manifest)
+    if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+        _verify_checksums_file(directory, manifest)
 
 
 def _validate_source_record(
@@ -884,7 +961,7 @@ def _ensure_success_evidence(directory: Path, manifest: dict[str, Any]) -> None:
         "checksums_sha256": checksums_digest,
     }
     _write_json(success_path, success)
-    _fsync_directory(directory)
+    sync_directory(directory)
     verify_archive(directory)
     log_event(
         LOGGER,
@@ -1202,7 +1279,10 @@ def _set_symlink_mtime(path: Path, mtime_ns: int) -> None:
         return
 
 
-def _remove_empty_source_directories(source_root: Path) -> None:
+def _remove_empty_source_directories(source_root: Path) -> set[Path]:
+    """Remove empty descendants and return parent directories whose namespace changed."""
+
+    changed: set[Path] = set()
     directories = sorted(
         (path for path in source_root.rglob("*") if path.is_dir() and not path.is_symlink()),
         key=lambda path: len(path.parts),
@@ -1211,25 +1291,28 @@ def _remove_empty_source_directories(source_root: Path) -> None:
     for directory in directories:
         try:
             directory.rmdir()
+            changed.add(directory.parent)
         except OSError:
             continue
+    return changed
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    descriptor = os.open(path, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    """Backward-compatible wrapper around the shared durability helper."""
+
+    sync_directory(path)
 
 
 def _require_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ExecutionError("now must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _observed_utc_now() -> datetime:
+    """Return the observed UTC time for archival evidence events."""
+
+    return datetime.now(UTC)
 
 
 def _format_utc(value: datetime) -> str:

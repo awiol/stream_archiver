@@ -103,6 +103,42 @@ class ArchivePlan:
     actions: tuple[PlannedAction, ...]
 
     @property
+    def payload_actions(self) -> tuple[PlannedAction, ...]:
+        """Return actions that create objects in the archive payload namespace."""
+
+        return tuple(
+            action
+            for action in self.actions
+            if action.kind
+            in {
+                ActionKind.MOVE,
+                ActionKind.GZIP,
+                ActionKind.BZ2,
+                ActionKind.PRESERVE_SYMLINK,
+            }
+        )
+
+    @property
+    def cleanup_only_actions(self) -> tuple[PlannedAction, ...]:
+        """Return selected actions that remove source entries without archiving them."""
+
+        return tuple(
+            action for action in self.actions if action.kind is ActionKind.DROP_ALIAS_SYMLINK
+        )
+
+    @property
+    def payload_oldest_mtime_ns(self) -> int:
+        """Return the oldest modification time among payload-producing entries."""
+
+        return min(action.source.mtime_ns for action in self.payload_actions)
+
+    @property
+    def payload_newest_mtime_ns(self) -> int:
+        """Return the newest modification time among payload-producing entries."""
+
+        return max(action.source.mtime_ns for action in self.payload_actions)
+
+    @property
     def final_directory(self) -> Path:
         """Return the committed archive directory for this plan."""
 

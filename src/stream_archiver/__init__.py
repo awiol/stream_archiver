@@ -1,4 +1,4 @@
-"""Policy-driven safe movement of complete, old filesystem streams."""
+"""Policy-driven archival of complete, old filesystem streams."""
 
 from stream_archiver.config import (
     AppConfig,
@@ -9,7 +9,7 @@ from stream_archiver.config import (
     load_config,
 )
 from stream_archiver.executor import ArchiveVerificationResult, verify_archive
-from stream_archiver.service import PolicyRunResult, run_policy, verify_destination
+from stream_archiver.service import PolicyRunResult, run_policy, verify_destination, verify_policies
 
 __all__ = [
     "AppConfig",
@@ -23,6 +23,7 @@ __all__ = [
     "run_policy",
     "verify_archive",
     "verify_destination",
+    "verify_policies",
 ]
 
-__version__ = "0.3.4b1"
+__version__ = "0.4.0a1"

@@ -88,6 +88,8 @@ def build_archive_plan(
     policy: Policy,
     source_root: Path,
     stream: Stream,
+    *,
+    source_entries: tuple[Entry, ...] | None = None,
 ) -> ArchivePlan | None:
     """Build one source-scoped deterministic plan.
 
@@ -99,12 +101,30 @@ def build_archive_plan(
     if source_root not in policy.sources:
         raise PlanningError(f"source is not owned by policy {policy.name!r}: {source_root}")
 
-    regular_identities = {
+    all_entries = source_entries if source_entries is not None else stream.entries
+    source_regular_identities = {
+        (entry.identity.device, entry.identity.inode)
+        for entry in all_entries
+        if entry.kind is EntryKind.REGULAR
+    }
+    selected_regular_identities = {
         (entry.identity.device, entry.identity.inode)
         for entry in stream.entries
         if entry.kind is EntryKind.REGULAR
     }
-    actions = tuple(_plan_entry(policy, entry, regular_identities) for entry in stream.entries)
+    actions = tuple(
+        _plan_entry(policy, entry, source_regular_identities) for entry in stream.entries
+    )
+    if policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE:
+        selected_paths = {entry.relative_path for entry in stream.entries}
+        alias_actions = tuple(
+            PlannedAction(entry, ActionKind.DROP_ALIAS_SYMLINK, None)
+            for entry in all_entries
+            if entry.kind is EntryKind.SYMLINK
+            and entry.relative_path not in selected_paths
+            and _resolved_target_identity(entry.absolute_path) in selected_regular_identities
+        )
+        actions += alias_actions
     actions = _resolve_archive_path_collisions(actions)
     payload_actions = tuple(
         action
@@ -121,9 +141,11 @@ def build_archive_plan(
         return None
 
     plan_id = _plan_id(policy, source_root, stream, actions)
+    payload_oldest = min(action.source.mtime_ns for action in payload_actions)
+    payload_newest = max(action.source.mtime_ns for action in payload_actions)
     archive_name = (
-        f"{_format_timestamp(stream.oldest_mtime_ns)}--"
-        f"{_format_timestamp(stream.newest_mtime_ns)}--{plan_id[:10]}"
+        f"{_format_timestamp(payload_oldest)}--"
+        f"{_format_timestamp(payload_newest)}--{plan_id[:10]}"
     )
     log_event(
         LOGGER,
@@ -144,6 +166,43 @@ def build_archive_plan(
         archive_name=archive_name,
         stream=stream,
         actions=actions,
+    )
+
+
+def boundary_entries_for_policy(
+    policy: Policy,
+    entries: tuple[Entry, ...],
+) -> tuple[Entry, ...]:
+    """Return source entries whose timestamps define stream boundaries.
+
+    Alias classification is intentionally source-root-wide. Alias symlinks and
+    symlinks that the policy will skip do not split or extend a stream.
+    Preserved non-alias relative symlinks remain normal boundary entries and use
+    their own modification times.
+    """
+
+    regular_identities = {
+        (entry.identity.device, entry.identity.inode)
+        for entry in entries
+        if entry.kind is EntryKind.REGULAR
+    }
+    boundary: list[Entry] = []
+    for entry in entries:
+        if entry.kind is EntryKind.REGULAR:
+            boundary.append(entry)
+            continue
+        if policy.symlink_rule is SymlinkRule.IGNORE:
+            continue
+        if entry.link_target is None or os.path.isabs(entry.link_target):
+            continue
+        if (
+            policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE
+            and _resolved_target_identity(entry.absolute_path) in regular_identities
+        ):
+            continue
+        boundary.append(entry)
+    return tuple(
+        sorted(boundary, key=lambda item: (item.mtime_ns, item.relative_path.as_posix()))
     )
 
 
@@ -335,8 +394,8 @@ def _plan_id(
             }
             for action in actions
         ],
-        "oldest_mtime_ns": stream.oldest_mtime_ns,
-        "newest_mtime_ns": stream.newest_mtime_ns,
+        "selection_oldest_mtime_ns": stream.oldest_mtime_ns,
+        "selection_newest_mtime_ns": stream.newest_mtime_ns,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

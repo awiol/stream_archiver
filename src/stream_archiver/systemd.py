@@ -108,7 +108,6 @@ def render_systemd_bundle(
             )
 
     state_path = Path("/var/lib") / service_name / "state.json"
-    lock_path = Path("/run") / service_name / "execution.lock"
     writable_paths = sorted(
         {
             *(source for policy in config.policies for source in policy.sources),
@@ -124,7 +123,6 @@ def render_systemd_bundle(
         service_user=service_user,
         service_group=service_group,
         state_path=state_path,
-        lock_path=lock_path,
         writable_paths=writable_paths,
         log_level=normalized_level,
         log_format=log_format,
@@ -158,7 +156,6 @@ def _service_unit(
     service_user: str,
     service_group: str,
     state_path: Path,
-    lock_path: Path,
     writable_paths: list[Path],
     log_level: str,
     log_format: str,
@@ -176,21 +173,13 @@ def _service_unit(
             "run-if-due",
             "--state",
             str(state_path),
-            "--lock-file",
-            str(lock_path),
         )
-    )
-    conditions = "\n".join(
-        f"ConditionPathIsDirectory={_escape_unit_path(path)}" for path in writable_paths
     )
     permissions = "\n".join(
         f"ReadWritePaths={_quote_unit_argument(str(path))}" for path in writable_paths
     )
-    protect_home = "false" if _requires_home_access([config_path, *writable_paths]) else "true"
     return f"""[Unit]
 Description=Archive complete old filesystem streams
-ConditionPathExists={_escape_unit_path(config_path)}
-{conditions}
 
 [Service]
 Type=oneshot
@@ -205,7 +194,7 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome={protect_home}
+ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -220,36 +209,6 @@ StandardError=journal
 SyslogIdentifier={service_name}
 """
 
-
-def _requires_home_access(paths: list[Path]) -> bool:
-    """Return whether configured policy paths need systemd home-tree access.
-
-    ``ProtectHome=true`` hides ``/home``, ``/root``, and ``/run/user`` inside
-    the service mount namespace.  Disable that sandbox only when a configured
-    source or destination is located below one of those trees; the generated
-    ``ReadWritePaths`` list still limits writable locations under
-    ``ProtectSystem=strict``.
-    """
-
-    protected_roots = (Path("/home"), Path("/root"), Path("/run/user"))
-    return any(path == root or root in path.parents for path in paths for root in protected_roots)
-
-
-def _escape_unit_path(path: Path) -> str:
-    """Escape one absolute path for an unquoted systemd path directive.
-
-    ``ConditionPath*`` treats surrounding quote characters as literal path
-    characters.  Encode whitespace and backslashes instead of applying the
-    command-line quoting used by ``ExecStart`` and ``ReadWritePaths``.
-    Percent signs are doubled so that systemd does not interpret them as
-    specifiers.
-    """
-
-    value = str(path)
-    if not path.is_absolute():
-        raise ConfigurationError(f"systemd condition path must be absolute: {path}")
-    _reject_control_characters(value, "systemd path")
-    return value.replace("%", "%%").replace("\\", r"\x5c").replace(" ", r"\x20")
 
 
 def _timer_unit(
@@ -303,8 +262,8 @@ create files in each destination:
 
 {paths}
 
-The generated service deliberately refuses to start when any configured source
-or destination directory is absent.
+The generated service starts the application even when a configured source or destination is
+missing. Stream Archiver then reports the prerequisite failure in journald and exits non-zero.
 
 ## 2. Validate before installation
 

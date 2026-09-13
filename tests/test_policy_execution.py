@@ -1,4 +1,4 @@
-"""Filesystem tests protect safe movement, compression, evidence, and recovery."""
+"""Filesystem tests protect archival transactions, compression, evidence, and recovery."""
 
 from __future__ import annotations
 
@@ -147,6 +147,7 @@ def test_policies_with_shared_destination_create_distinct_archives(
     first_source = tmp_path / "first"
     second_source = tmp_path / "second"
     destination = tmp_path / "archive"
+    destination.mkdir()
     old = NOW - timedelta(days=40)
     write_at(first_source / "data.txt", b"first", old)
     write_at(second_source / "data.txt", b"second", old)
@@ -292,7 +293,9 @@ def test_pending_cleanup_has_no_success_marker_and_recovery_creates_one(
     assert original.exists()
 
     monkeypatch.undo()
-    recovered = recover_pending_archives(destination, source, now=NOW + timedelta(hours=1))
+    recovered = recover_pending_archives(
+        destination, source, event_clock=lambda: NOW + timedelta(hours=1)
+    )
 
     assert recovered == (archive,)
     assert not original.exists()
@@ -321,7 +324,7 @@ def test_source_change_after_commit_blocks_recovery(
     original.write_bytes(b"changed")
 
     with pytest.raises(RecoveryError, match="source changed after planning"):
-        recover_pending_archives(destination, source, now=NOW)
+        recover_pending_archives(destination, source, event_clock=lambda: NOW)
     assert original.read_bytes() == b"changed"
 
 
@@ -387,7 +390,7 @@ def test_recovery_rejects_manifest_path_traversal(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RecoveryError, match="unsafe path"):
-        recover_pending_archives(destination, source, now=NOW)
+        recover_pending_archives(destination, source, event_clock=lambda: NOW)
     assert victim.read_text(encoding="utf-8") == "keep"
 
 
@@ -430,6 +433,7 @@ def test_invalid_staging_path_is_reported_without_deleting_source(
 
 
 def _policy(sources: tuple[Path, ...], destination: Path) -> Policy:
+    destination.mkdir(parents=True, exist_ok=True)
     return Policy(
         name="reports",
         sources=sources,
@@ -442,3 +446,263 @@ def _policy(sources: tuple[Path, ...], destination: Path) -> Policy:
             CompressionRule((".html",), CompressionCodec.BZ2),
         ),
     )
+
+
+def test_corrupt_pending_archive_preserves_remaining_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-SAFE-005/006: recovery verifies committed bytes before deleting source.
+
+    This is the discriminating regression for the v0.3.4b1 data-loss defect: the
+    old ordering removed the source first and detected archive corruption only
+    while creating completion evidence.
+    """
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    original = write_at(source / "data.txt", b"only-good-copy", NOW - timedelta(days=40))
+
+    def fail_cleanup(*args: object, **kwargs: object) -> set[Path]:
+        raise ExecutionError("injected cleanup interruption")
+
+    monkeypatch.setattr("stream_archiver.executor._remove_sources", fail_cleanup)
+    with pytest.raises(ExecutionError, match="cleanup interruption"):
+        run_policy(_policy((source,), destination), now=NOW)
+    monkeypatch.undo()
+
+    archive = next(path for path in destination.iterdir() if not path.name.startswith("."))
+    (archive / "data.txt").write_bytes(b"CORRUPTED")
+
+    with pytest.raises(RecoveryError, match="(size|SHA-256) mismatch"):
+        recover_pending_archives(
+        destination, source, event_clock=lambda: NOW + timedelta(hours=1)
+    )
+
+    assert original.read_bytes() == b"only-good-copy"
+
+
+def test_committed_verification_failure_blocks_normal_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-SAFE-002/003: a final-path verification failure preserves source data."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    original = write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
+    policy = _policy((source,), destination)
+
+    def fail_committed_verification(*args: object, **kwargs: object) -> None:
+        raise RecoveryError("injected committed verification failure")
+
+    monkeypatch.setattr(
+        "stream_archiver.executor._verify_committed_pending_archive",
+        fail_committed_verification,
+    )
+
+    with pytest.raises(RecoveryError, match="committed verification failure"):
+        run_policy(policy, now=NOW)
+
+    assert original.read_bytes() == b"important"
+
+
+def test_alias_cleanup_follows_old_target_across_stream_boundaries(tmp_path: Path) -> None:
+    """R-SYM-001/002: alias mtime cannot leave a dangling alias after target cleanup."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    target = write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    alias = symlink_at(source / "alias.txt", "data.txt", NOW - timedelta(days=10))
+
+    result = run_policy(_policy((source,), destination), now=NOW)
+
+    assert len(result.archives) == 1
+    assert not target.exists()
+    assert not alias.exists()
+    assert (result.archives[0].archive_directory / "data.txt").read_bytes() == b"payload"
+
+
+def test_sync_failure_after_commit_preserves_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-DUR-006: failure to persist the committed namespace blocks cleanup."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    original = write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
+    policy = _policy((source,), destination)
+
+    def fail_sync(_path: Path) -> None:
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr("stream_archiver.executor.sync_directory", fail_sync)
+
+    with pytest.raises(ExecutionError, match="filesystem operation failed"):
+        run_policy(policy, now=NOW)
+
+    assert original.read_bytes() == b"important"
+
+
+def test_policy_scoped_and_destination_wide_verification_are_distinct(tmp_path: Path) -> None:
+    """R-VERIFY-001/002: shared destinations do not expand selected policy scope implicitly."""
+
+    from stream_archiver.service import verify_policies
+
+    destination = tmp_path / "archive"
+    destination.mkdir()
+    first_source = tmp_path / "first"
+    second_source = tmp_path / "second"
+    old = NOW - timedelta(days=40)
+    write_at(first_source / "first.txt", b"first", old)
+    write_at(second_source / "second.txt", b"second", old)
+    first = Policy(
+        name="first",
+        sources=(first_source,),
+        destination=destination,
+        minimum_age=timedelta(days=30),
+        stream_gap=timedelta(hours=8),
+        symlink_rule=SymlinkRule.IGNORE,
+        compression_rules=(),
+    )
+    second = Policy(
+        name="second",
+        sources=(second_source,),
+        destination=destination,
+        minimum_age=timedelta(days=30),
+        stream_gap=timedelta(hours=8),
+        symlink_rule=SymlinkRule.IGNORE,
+        compression_rules=(),
+    )
+    run_policy(first, now=NOW)
+    run_policy(second, now=NOW)
+
+    assert len(verify_policies((first,))) == 1
+    assert len(verify_policies((first,), all_in_destination=True)) == 2
+
+
+def test_destination_audit_reports_archive_shaped_directory_without_manifest(
+    tmp_path: Path,
+) -> None:
+    """R-VERIFY-003/005: missing evidence is corruption, not an invisible archive."""
+
+    from stream_archiver.service import verify_policies
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    malformed = destination / "20260101T000000.000000Z--20260101T010000.000000Z--0123456789"
+    malformed.mkdir()
+    policy = Policy(
+        name="reports",
+        sources=(source,),
+        destination=destination,
+        minimum_age=timedelta(days=30),
+        stream_gap=timedelta(hours=8),
+        symlink_rule=SymlinkRule.IGNORE,
+        compression_rules=(),
+    )
+
+    with pytest.raises(RecoveryError, match="missing MANIFEST.json"):
+        verify_policies((policy,), all_in_destination=True)
+
+
+def test_planning_time_does_not_stamp_archive_evidence(tmp_path: Path) -> None:
+    """R-TIME-003: planning time and observed evidence-event time stay separate.
+
+    The policy uses ``NOW`` only for age selection.  The injected internal event
+    clock supplies distinct creation and cleanup times, proving that a planning
+    reference does not leak into destructive transaction evidence.
+    """
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    created_at = NOW + timedelta(days=10)
+    cleaned_at = created_at + timedelta(seconds=7)
+    observed = iter((created_at, cleaned_at))
+
+    result = run_policy(
+        _policy((source,), destination),
+        now=NOW,
+        event_clock=lambda: next(observed),
+    )
+
+    manifest = json.loads(
+        (result.archives[0].archive_directory / MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert manifest["created_at"] == created_at.isoformat().replace("+00:00", "Z")
+    assert manifest["cleanup_completed_at"] == cleaned_at.isoformat().replace("+00:00", "Z")
+
+
+def test_cleanup_persists_unlinks_before_removing_empty_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-DUR-004/006: persist file unlinks before removing emptied directories.
+
+    The first cleanup synchronization must target the directory that contained
+    the removed file while it still exists.  Only then may empty-directory
+    cleanup run and synchronize the surviving parent namespace.
+    """
+
+    source = tmp_path / "source"
+    nested = source / "nested"
+    destination = tmp_path / "archive"
+    write_at(nested / "data.txt", b"payload", NOW - timedelta(days=40))
+    sync_calls: list[set[Path]] = []
+
+    monkeypatch.setattr(
+        "stream_archiver.executor.sync_directories",
+        lambda paths: sync_calls.append(set(paths)),
+    )
+
+    run_policy(_policy((source,), destination), now=NOW)
+
+    assert sync_calls[0] == {nested}
+    assert sync_calls[1] == {source}
+
+
+def test_cleanup_sync_failure_leaves_recoverable_pending_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-DUR-006: a post-unlink sync failure cannot create false completion.
+
+    This exercises the irreversible-side-effect boundary: the source unlink has
+    happened, but persistence of the source directory has not been established.
+    The committed archive must remain pending, omit SUCCESS evidence, and be
+    recoverable after the synchronization fault is removed.
+    """
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    original = write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    calls = 0
+    executor_module = __import__("stream_archiver.executor", fromlist=["sync_directories"])
+    real_sync = executor_module.sync_directories
+
+    def fail_first_cleanup_sync(paths: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected cleanup persistence failure")
+        real_sync(paths)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("stream_archiver.executor.sync_directories", fail_first_cleanup_sync)
+
+    with pytest.raises(ExecutionError, match="cleanup persistence failure"):
+        run_policy(_policy((source,), destination), now=NOW)
+
+    assert not original.exists()
+    archive = next(path for path in destination.iterdir() if not path.name.startswith("."))
+    pending = json.loads((archive / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert pending["cleanup_complete"] is False
+    assert not (archive / SUCCESS_NAME).exists()
+
+    monkeypatch.undo()
+    recovered = recover_pending_archives(destination, source, event_clock=lambda: NOW)
+    assert recovered == (archive,)
+    assert verify_archive(archive).success_evidence == archive / SUCCESS_NAME

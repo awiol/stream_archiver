@@ -63,10 +63,8 @@ def test_rendered_units_derive_paths_without_editable_placeholders(
         assert str(policy.destination) in service
         for source in policy.sources:
             assert str(source) in service
-    spaced_source = config.policies[0].sources[0]
-    escaped_source = str(spaced_source).replace(" ", r"\x20")
-    assert f"ConditionPathIsDirectory={escaped_source}" in service
-    assert f'ConditionPathIsDirectory="{spaced_source}"' not in service
+    assert "ConditionPath" not in service
+    assert "--lock-file" not in service
     assert "REPLACE" not in service
     assert "/opt/stream-archiver-0." not in service
     assert "Regenerate rather than editing" in instructions
@@ -113,9 +111,12 @@ def test_guided_installer_is_syntax_valid_and_version_independent() -> None:
     assert "--on-calendar VALUE" in text
     assert "--service-log-level LEVEL" in text
     assert "/opt/stream-archiver-0." not in text
-    assert "does not start the mover or enable the timer" in text
-    assert text.index("Refusing to replace") < text.index("python3 -m venv")
-    assert "SHA256SUMS does not contain the bundled wheel" in text
+    assert "does not start the" in text
+    assert "mover or enable the timer" in text
+    assert "--python-version VERSION" in text
+    assert "PYTHON_VERSION=3.11" in text
+    assert text.index("Refusing to replace") < text.index('"$UV_BIN" python install')
+    assert "SHA256SUMS has no bundled wheel entry" in text
 
 
 def test_rendered_service_allows_configured_paths_under_home(tmp_path: Path) -> None:
@@ -151,5 +152,5 @@ def test_rendered_service_allows_configured_paths_under_home(tmp_path: Path) -> 
     )
 
     service = result.service_path.read_text(encoding="utf-8")
-    assert "ProtectHome=false" in service
+    assert "ProtectHome=read-only" in service
     assert f'ReadWritePaths="{source}"' in service

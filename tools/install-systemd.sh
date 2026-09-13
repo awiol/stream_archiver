@@ -24,11 +24,13 @@ Options:
   --service-log-level LEVEL  DEBUG, INFO, WARNING, ERROR, or CRITICAL
                              (default: INFO).
   --service-log-format NAME  text or json (default: text).
+  --python-version VERSION   uv-managed Python version (default: 3.11).
   --replace-config           Replace an existing installed policy file.
   --help                     Show this help.
 
-The script installs and validates the package and units. It does not start the mover or enable the timer; those operations can move files and require a
-reviewed plan and a successful manual service run.
+The script installs and validates the package and units. It does not start the
+mover or enable the timer; those operations can move files and require a reviewed
+plan and a successful manual service run.
 EOF
 }
 
@@ -44,7 +46,7 @@ ACCURACY=1h
 SERVICE_LOG_LEVEL=INFO
 SERVICE_LOG_FORMAT=text
 REPLACE_CONFIG=0
-PYTHON_VERSION=3.14
+PYTHON_VERSION=3.11
 
 while (($#)); do
     case "$1" in
@@ -187,7 +189,8 @@ if [[ -f $PACKAGE_ROOT/SHA256SUMS ]]; then
         (cd -- "$PACKAGE_ROOT" && printf '%s\n' "$WHEEL_RECORD" | sha256sum -c -)
     else
         printf \
-            'Warning: SHA256SUMS does not contain the bundled wheel entry for %s; continuing without checksum verification.\n' \
+            'Warning: SHA256SUMS has no bundled wheel entry for %s; ' \
+            'continuing without checksum verification.\n' \
             "$(basename -- "$WHEEL")" >&2
     fi
 else

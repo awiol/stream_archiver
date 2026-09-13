@@ -20,14 +20,13 @@ def test_run_if_due_archives_once_then_reports_not_due(tmp_path: Path, capsys: o
     state = tmp_path / "state.json"
     lock = tmp_path / "run.lock"
     write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    destination.mkdir()
     config = _write_config(tmp_path, source, destination)
 
     first_status = main(
         [
             "--config",
             str(config),
-            "--now",
-            NOW.isoformat(),
             "run-if-due",
             "--state",
             str(state),
@@ -41,8 +40,6 @@ def test_run_if_due_archives_once_then_reports_not_due(tmp_path: Path, capsys: o
         [
             "--config",
             str(config),
-            "--now",
-            (NOW + timedelta(days=1)).isoformat(),
             "run-if-due",
             "--state",
             str(state),
@@ -88,8 +85,9 @@ def test_verify_command_reports_hash_evidence(tmp_path: Path, capsys: object) ->
     source = tmp_path / "source"
     destination = tmp_path / "archive"
     write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    destination.mkdir()
     config = _write_config(tmp_path, source, destination)
-    assert main(["--config", str(config), "--now", NOW.isoformat(), "run"]) == 0
+    assert main(["--config", str(config), "run"]) == 0
     capsys.readouterr()  # type: ignore[attr-defined]
 
     status = main(["--config", str(config), "verify"])
@@ -142,20 +140,79 @@ def test_explicit_config_overrides_environment(
     assert output["policies"][0]["name"] == "reports"
 
 
-def test_manual_run_uses_xdg_state_directory_for_default_lock(
+def test_legacy_lock_file_is_ignored_in_favor_of_resource_locks(
     tmp_path: Path, capsys: object, monkeypatch: object
 ) -> None:
-    """A default system config does not imply an unwritable lock beside that file."""
+    """The 0.3 lock-file option cannot redefine the 0.4 safety lock domain."""
 
     source = tmp_path / "source"
     destination = tmp_path / "archive"
-    state_home = tmp_path / "state home"
+    legacy_lock = tmp_path / "legacy.lock"
     write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    destination.mkdir()
     config = _write_config(tmp_path, source, destination)
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))  # type: ignore[attr-defined]
 
-    status = main(["--config", str(config), "--now", NOW.isoformat(), "run"])
-    capsys.readouterr()  # type: ignore[attr-defined]
+    status = main(["--config", str(config), "run", "--lock-file", str(legacy_lock)])
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
 
     assert status == 0
-    assert (state_home / "stream-archiver" / "execution.lock").is_file()
+    assert not legacy_lock.exists()
+    assert "legacy_lock_file_ignored" in captured.err
+
+
+def test_plan_at_is_read_only_and_destructive_commands_reject_global_now(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    """Artificial time is available only on the read-only planning surface."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    config = _write_config(tmp_path, source, destination)
+
+    assert main(["--config", str(config), "plan", "--at", NOW.isoformat()]) == 0
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["--config", str(config), "--now", NOW.isoformat(), "run"])
+
+
+def test_run_if_due_state_parent_is_in_resource_lock_domain(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    """R-CONC/SCHED: due-state read/modify/write participates in serialization.
+
+    A competing invocation that otherwise owns disjoint source/destination
+    resources must still fail to acquire its destructive lock set while the
+    shared scheduling-state directory is exclusively owned.
+    """
+
+    from stream_archiver.locking import resource_locks
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    state = tmp_path / "state" / "due.json"
+    source.mkdir()
+    destination.mkdir()
+    state.parent.mkdir()
+    config = _write_config(tmp_path, source, destination)
+
+    with resource_locks((state.parent,), exclusive=True):
+        status = main(
+            [
+                "--config",
+                str(config),
+                "run-if-due",
+                "--state",
+                str(state),
+            ]
+        )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 2
+    assert "conflicting exclusive resource lock" in captured.err
