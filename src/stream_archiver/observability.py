@@ -145,7 +145,7 @@ def _parse_log_level(value: str) -> int:
     normalized = value.upper()
     level = logging.getLevelNamesMapping().get(normalized)
     if not isinstance(level, int):
-        raise ValueError(f"unsupported log level: {value}")
+        raise ValueError(f"unsupported log level: {value}")  # noqa: TRY004
     return level
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,7 +103,7 @@ def render_systemd_bundle(
     timer_path = output_directory / f"{service_name}.timer"
     instructions_path = output_directory / "INSTALL.md"
     for path in (service_path, timer_path, instructions_path):
-        if path.exists() and not force:
+        if os.path.lexists(path) and not force:
             raise ConfigurationError(
                 f"refusing to overwrite {path}; use --force after reviewing existing files"
             )
@@ -208,7 +209,6 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier={service_name}
 """
-
 
 
 def _timer_unit(
@@ -323,4 +323,20 @@ def _reject_control_characters(value: str, description: str) -> None:
 
 
 def _write_text(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8", newline="\n")
+    """Atomically replace one generated file without following an output symlink."""
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass

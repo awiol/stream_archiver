@@ -90,7 +90,8 @@ mkdir -p \
   .verification-dist \
   .verification-install \
   .verification-tests/tests \
-  .verification-tests/tools
+  .verification-tests/tools \
+  .verification-tests/examples/config
 "$PYTHON" -m pip wheel . --no-deps --no-build-isolation --wheel-dir .verification-dist
 wheel=$(
   find .verification-dist -maxdepth 1 -type f -name 'stream_archiver-*.whl' -print \
@@ -104,6 +105,7 @@ fi
 "$PYTHON" -m pip install --no-deps --no-compile --target .verification-install "$wheel"
 cp -a tests/. .verification-tests/tests/
 cp pyproject.toml .verification-tests/pyproject.toml
+cp examples/config/policies.toml .verification-tests/examples/config/policies.toml
 cp tools/install-systemd.sh .verification-tests/tools/install-systemd.sh
 (
   cd .verification-tests

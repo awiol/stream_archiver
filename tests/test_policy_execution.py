@@ -27,7 +27,7 @@ from stream_archiver.executor import (
     verify_archive,
 )
 from stream_archiver.model import ActionKind
-from stream_archiver.service import plan_policy, run_policy
+from stream_archiver.service import _run_policy_at, plan_policy
 from tests.helpers import symlink_at, write_at
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
@@ -67,7 +67,7 @@ def test_run_policy_safely_moves_and_compresses_with_success_evidence(
     monkeypatch.setattr("stream_archiver.executor.gzip.GzipFile", recording_gzip)
     monkeypatch.setattr("stream_archiver.executor.bz2.BZ2Compressor", recording_bz2)
 
-    result = run_policy(_policy((source,), destination), now=NOW)
+    result = _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     assert gzip_levels == [9]
     assert bz2_levels == [9]
@@ -125,7 +125,7 @@ def test_multiple_sources_produce_separate_final_directories(tmp_path: Path) -> 
     write_at(first / "same.txt", b"first", old)
     write_at(second / "same.txt", b"second", old)
 
-    result = run_policy(_policy((first, second), destination), now=NOW)
+    result = _run_policy_at(_policy((first, second), destination), planning_time=NOW)
 
     assert len(result.archives) == 2
     directories = {item.archive_directory for item in result.archives}
@@ -170,8 +170,8 @@ def test_policies_with_shared_destination_create_distinct_archives(
         compression_rules=(),
     )
 
-    first_result = run_policy(first_policy, now=NOW)
-    second_result = run_policy(second_policy, now=NOW)
+    first_result = _run_policy_at(first_policy, planning_time=NOW)
+    second_result = _run_policy_at(second_policy, planning_time=NOW)
 
     directories = {
         first_result.archives[0].archive_directory,
@@ -190,7 +190,11 @@ def test_verify_archive_rejects_tampered_success_marker(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"
     write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
-    archive = run_policy(_policy((source,), destination), now=NOW).archives[0].archive_directory
+    archive = (
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
+        .archives[0]
+        .archive_directory
+    )
     success_path = archive / SUCCESS_NAME
     success = json.loads(success_path.read_text(encoding="utf-8"))
     success["manifest_sha256"] = "0" * 64
@@ -218,7 +222,7 @@ def test_plan_disambiguates_compression_destination_collision(tmp_path: Path) ->
     assert compressed_path.name.startswith("data.json.stream-archiver-")
     assert compressed_path.suffix == ".gz"
 
-    result = run_policy(_policy((source,), destination), now=NOW)
+    result = _run_policy_at(_policy((source,), destination), planning_time=NOW)
     archive = result.archives[0].archive_directory
     assert (archive / "data.json.gz").read_bytes() == b"already present"
     assert gzip.decompress((archive / compressed_path).read_bytes()) == b"source"
@@ -260,7 +264,7 @@ def test_staging_failure_leaves_sources_and_no_committed_archive(
     monkeypatch.setattr("stream_archiver.executor._write_regular_payload", fail_write)
 
     with pytest.raises(ExecutionError, match="injected write failure"):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     assert original.read_bytes() == b"important"
     committed = [path for path in destination.iterdir() if path.name != ".stream-archiver-staging"]
@@ -282,7 +286,7 @@ def test_pending_cleanup_has_no_success_marker_and_recovery_creates_one(
 
     monkeypatch.setattr("stream_archiver.executor._remove_sources", fail_cleanup)
     with pytest.raises(ExecutionError, match="injected cleanup failure"):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     archive = next(
         path for path in destination.iterdir() if path.name != ".stream-archiver-staging"
@@ -318,7 +322,7 @@ def test_source_change_after_commit_blocks_recovery(
 
     monkeypatch.setattr("stream_archiver.executor._remove_sources", fail_cleanup)
     with pytest.raises(ExecutionError):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
     monkeypatch.undo()
 
     original.write_bytes(b"changed")
@@ -334,7 +338,11 @@ def test_verify_archive_detects_payload_corruption(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"
     write_at(source / "data.txt", b"important", NOW - timedelta(days=40))
-    archive = run_policy(_policy((source,), destination), now=NOW).archives[0].archive_directory
+    archive = (
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
+        .archives[0]
+        .archive_directory
+    )
     (archive / "data.txt").write_bytes(b"corrupt")
 
     with pytest.raises(RecoveryError, match="(size|SHA-256) mismatch"):
@@ -427,7 +435,7 @@ def test_invalid_staging_path_is_reported_without_deleting_source(
     (destination / ".stream-archiver-staging").write_text("not a directory", encoding="utf-8")
 
     with pytest.raises(ExecutionError, match="filesystem operation failed"):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     assert original.read_bytes() == b"important"
 
@@ -468,16 +476,14 @@ def test_corrupt_pending_archive_preserves_remaining_source(
 
     monkeypatch.setattr("stream_archiver.executor._remove_sources", fail_cleanup)
     with pytest.raises(ExecutionError, match="cleanup interruption"):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
     monkeypatch.undo()
 
     archive = next(path for path in destination.iterdir() if not path.name.startswith("."))
     (archive / "data.txt").write_bytes(b"CORRUPTED")
 
     with pytest.raises(RecoveryError, match="(size|SHA-256) mismatch"):
-        recover_pending_archives(
-        destination, source, event_clock=lambda: NOW + timedelta(hours=1)
-    )
+        recover_pending_archives(destination, source, event_clock=lambda: NOW + timedelta(hours=1))
 
     assert original.read_bytes() == b"only-good-copy"
 
@@ -502,7 +508,7 @@ def test_committed_verification_failure_blocks_normal_cleanup(
     )
 
     with pytest.raises(RecoveryError, match="committed verification failure"):
-        run_policy(policy, now=NOW)
+        _run_policy_at(policy, planning_time=NOW)
 
     assert original.read_bytes() == b"important"
 
@@ -515,7 +521,7 @@ def test_alias_cleanup_follows_old_target_across_stream_boundaries(tmp_path: Pat
     target = write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
     alias = symlink_at(source / "alias.txt", "data.txt", NOW - timedelta(days=10))
 
-    result = run_policy(_policy((source,), destination), now=NOW)
+    result = _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     assert len(result.archives) == 1
     assert not target.exists()
@@ -540,7 +546,7 @@ def test_sync_failure_after_commit_preserves_source(
     monkeypatch.setattr("stream_archiver.executor.sync_directory", fail_sync)
 
     with pytest.raises(ExecutionError, match="filesystem operation failed"):
-        run_policy(policy, now=NOW)
+        _run_policy_at(policy, planning_time=NOW)
 
     assert original.read_bytes() == b"important"
 
@@ -575,8 +581,8 @@ def test_policy_scoped_and_destination_wide_verification_are_distinct(tmp_path: 
         symlink_rule=SymlinkRule.IGNORE,
         compression_rules=(),
     )
-    run_policy(first, now=NOW)
-    run_policy(second, now=NOW)
+    _run_policy_at(first, planning_time=NOW)
+    _run_policy_at(second, planning_time=NOW)
 
     assert len(verify_policies((first,))) == 1
     assert len(verify_policies((first,), all_in_destination=True)) == 2
@@ -624,9 +630,9 @@ def test_planning_time_does_not_stamp_archive_evidence(tmp_path: Path) -> None:
     cleaned_at = created_at + timedelta(seconds=7)
     observed = iter((created_at, cleaned_at))
 
-    result = run_policy(
+    result = _run_policy_at(
         _policy((source,), destination),
-        now=NOW,
+        planning_time=NOW,
         event_clock=lambda: next(observed),
     )
 
@@ -637,15 +643,14 @@ def test_planning_time_does_not_stamp_archive_evidence(tmp_path: Path) -> None:
     assert manifest["cleanup_completed_at"] == cleaned_at.isoformat().replace("+00:00", "Z")
 
 
-def test_cleanup_persists_unlinks_before_removing_empty_directories(
+def test_cleanup_persists_unlinks_without_removing_unselected_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-DUR-004/006: persist file unlinks before removing emptied directories.
+    """Cleanup persists selected unlinks without mutating unselected directories.
 
-    The first cleanup synchronization must target the directory that contained
-    the removed file while it still exists.  Only then may empty-directory
-    cleanup run and synchronize the surviving parent namespace.
+    The directory that contained the removed file remains present even when it
+    becomes empty.  This keeps namespace mutation bounded to selected entries.
     """
 
     source = tmp_path / "source"
@@ -659,10 +664,10 @@ def test_cleanup_persists_unlinks_before_removing_empty_directories(
         lambda paths: sync_calls.append(set(paths)),
     )
 
-    run_policy(_policy((source,), destination), now=NOW)
+    _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
-    assert sync_calls[0] == {nested}
-    assert sync_calls[1] == {source}
+    assert sync_calls == [{nested}]
+    assert nested.is_dir()
 
 
 def test_cleanup_sync_failure_leaves_recoverable_pending_archive(
@@ -694,7 +699,7 @@ def test_cleanup_sync_failure_leaves_recoverable_pending_archive(
     monkeypatch.setattr("stream_archiver.executor.sync_directories", fail_first_cleanup_sync)
 
     with pytest.raises(ExecutionError, match="cleanup persistence failure"):
-        run_policy(_policy((source,), destination), now=NOW)
+        _run_policy_at(_policy((source,), destination), planning_time=NOW)
 
     assert not original.exists()
     archive = next(path for path in destination.iterdir() if not path.name.startswith("."))

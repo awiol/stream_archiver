@@ -117,6 +117,8 @@ def test_guided_installer_is_syntax_valid_and_version_independent() -> None:
     assert "PYTHON_VERSION=3.11" in text
     assert text.index("Refusing to replace") < text.index('"$UV_BIN" python install')
     assert "SHA256SUMS has no bundled wheel entry" in text
+    assert "No wheel matches project version" in text
+    assert "selecting the newest available wheel" not in text
 
 
 def test_rendered_service_allows_configured_paths_under_home(tmp_path: Path) -> None:

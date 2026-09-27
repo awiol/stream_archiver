@@ -18,7 +18,7 @@ Before destructive or scheduled operation:
 stream-archiver --config /path/to/policies.toml plan
 ```
 
-The timestamp-gap rule is a heuristic, not a producer-completion protocol.
+The timestamp-gap rule is a heuristic, not a producer-completion protocol. Schema 3 also makes recursive discovery and stream partitioning explicit; review `docs/user-guide.md` before changing either setting.
 
 ## Development and local verification
 
@@ -111,13 +111,11 @@ ignored by the 0.4 safety lock domain.
 
 ## Logs and progress
 
-Operational logs go to stderr/journald and machine-readable command results stay
-on stdout. Every CLI invocation has a `run_id`.
+Stream Archiver creates no log file by default. Manual operational logs go to stderr. The generated systemd service leaves stderr under journald. Command results stay on stdout; `plan` is human-readable by default and `plan --json` provides its detailed machine representation. Every CLI invocation has a `run_id`.
 
-Useful fields include `phase`, `operation`, `outcome`, `policy_name`,
-`source_root`, `source_path`, `destination_root`, `archive_name`,
-`archive_directory`, and `plan_id` where applicable. Older compatibility events
-may retain additional fields.
+Useful fields include `phase`, `operation`, `outcome`, `policy_name`, `source_root`, `source_path`, `destination_root`, `archive_name`, `archive_directory`, and `plan_id` where applicable. `archive_action` identifies an archival operation; `next_action` is reserved for remediation.
+
+INFO is event-driven at meaningful run/policy/source and stream/archive lifecycle boundaries, with aggregate staging progress derived from actual work. Routine per-entry discovery/staging/hashing/revalidation/cleanup and lock details are DEBUG. The approximate 1–10 second INFO density preference is only a representative-workload usability heuristic; no timer, heartbeat, rate limiter, or pass/fail gate implements it.
 
 `staging_percent=100` means payload staging is complete; it does not mean the
 transaction is complete. `transaction_percent=100` is emitted only after source
@@ -141,8 +139,9 @@ If some cleanup occurred before interruption, recovery reconciles missing versus
 still-present source entries and continues only when remaining preconditions
 hold.
 
-Do not edit a manifest to force cleanup after a source conflict. Preserve the
-available copies and resolve the conflict explicitly.
+Do not edit a manifest to force cleanup after a source conflict. Preserve the available copies and resolve the conflict explicitly.
+
+Automatic cleanup removes selected files/symlinks only. It does not recursively remove empty source directories, including directories made empty by selected-file cleanup.
 
 ## Durability boundary
 
@@ -164,10 +163,31 @@ This contract is bounded to the local-Linux-filesystem assumptions in
 4. Review the generated unit diff and run `systemd-analyze verify`.
 5. Perform one manual service run and `verify` before enabling the timer.
 
-Completed supported 0.3 archives remain verifiable. Valid v1 scheduling state is
-readable but affected policies are due until a successful v2 fingerprinted state
-record is written. Pending supported 0.3 cleanup uses the corrected
-verify-before-delete recovery ordering.
+Completed supported 0.3 and 0.4.0a1 archives remain verifiable. Valid v1 scheduling state is readable but affected policies are due until a successful v2 fingerprinted state record is written. Pending supported 0.3 cleanup uses the corrected verify-before-delete recovery ordering.
+
+Schema-1/2 configuration remains valid with recursive/source-root historical defaults. Use schema 3 when setting `recursive` or `stream_partition`. Because 0.4.0a2 adds those selection fields to the v2 policy fingerprint, a v2 fingerprint written by 0.4.0a1 intentionally mismatches once after upgrade; `run-if-due` therefore treats the policy as due and writes the a2 fingerprint only after successful completion. `plan` has been human-readable by default since 0.4.0a2; automation that consumed the 0.4.0a1 plan JSON must add `plan --json`.
+
+## Capacity observations and low-space handling
+
+`plan` compares selected regular source bytes with observed destination free bytes.
+Execution repeats the observation before each selected stream. These checks are
+advisory and do not reserve filesystem blocks. If capacity is low or cannot be
+observed, investigate the destination before large runs, but do not interpret the
+warning as a guarantee that the next write will fail or succeed.
+
+Human quantities use decimal SI labels. JSON/log byte fields are exact integers.
+A later `ENOSPC` follows the ordinary execution-failure path even when a precheck
+reported sufficient space.
+
+Repeated warnings are state-based. The implementation can warn again after a
+material worsening of an already-low condition. The current noise threshold is the
+greater of 64 MiB and 5% of the previous warned shortfall. This threshold is not a
+safety margin.
+
+After a newly committed stream, a warning named
+`unexpected_destination_capacity_consumption` can report free-space loss not
+explained by measured allocation of the committed archive tree. Treat it as a
+diagnostic observation, not as evidence of an external writer or a filesystem fault.
 
 ## Restore
 

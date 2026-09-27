@@ -338,5 +338,5 @@ symlink_rule = "ignore"
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigurationError, match="pairwise disjoint"):
+    with pytest.raises(ConfigurationError, match="source root must not be a symbolic link"):
         load_config(config)

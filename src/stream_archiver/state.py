@@ -76,6 +76,8 @@ def policy_fingerprint(policy: Policy) -> str:
         "minimum_age_microseconds": _timedelta_microseconds(policy.minimum_age),
         "stream_gap_microseconds": _timedelta_microseconds(policy.stream_gap),
         "symlink_rule": policy.symlink_rule.value,
+        "recursive": policy.recursive,
+        "stream_partition": policy.stream_partition.value,
         "compression_rules": [
             {
                 "suffixes": list(rule.suffixes),
@@ -204,7 +206,7 @@ def _parse_v1_state(raw: dict[str, Any], path: Path) -> dict[str, datetime]:
 
 def _parse_timestamp(value: str, name: str, path: Path) -> datetime:
     try:
-        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ExecutionError(f"invalid timestamp for policy {name!r} in {path}") from exc
     if moment.tzinfo is None or moment.utcoffset() is None:

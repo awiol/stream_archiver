@@ -1,14 +1,14 @@
 # Stream Archiver Design
 
-**Document version:** `0.4.0-alpha.2`
-**Target package development version:** `0.4.0a1`
-**Date:** 2026-09-13
-**Status:** implementation design for the first 0.4 alpha candidate
-**Requirements baseline:** `docs/requirements.md`, document version `0.4.0-alpha.2`
+**Document version:** `0.4.0-alpha.4`
+**Target package development version:** `0.4.0a3`
+**Date:** 2026-09-27
+**Status:** implementation design for the third 0.4 alpha candidate
+**Requirements baseline:** `docs/requirements.md`, document version `0.4.0-alpha.4`
 
 ## 1. Design objective
 
-The 0.4 design repairs the transaction and behavioral contracts without replacing the successful high-level architecture.
+The 0.4 design repairs transaction and behavioral contracts while preserving the high-level architecture. The second alpha consolidated operator interfaces and mutation/API boundaries. The third alpha adds bounded run-level accounting and advisory destination-capacity observations without changing transaction safety.
 
 The design retains:
 
@@ -79,14 +79,15 @@ SymlinkEntry
     mtime_ns
     link_text
     classification
-    resolved_regular_identity?  # only when safely resolvable within source root
+    resolved_regular_path?      # exact safely resolved path within source root
+    resolved_regular_identity?  # must match the discovered entry at that path
 ```
 
 Discovery never follows directory symlinks during traversal.
 
 ### 3.2 Symlink classification before stream segmentation
 
-After discovery, classify symlinks against the complete source-root regular-file identity map.
+After discovery, classify symlinks against the complete source-root regular-file path-and-identity map.
 
 Classes:
 
@@ -125,12 +126,17 @@ All comparisons use integer nanoseconds.
 
 ### 3.5 Alias attachment
 
-After eligible streams are selected, construct the set of selected regular-file identities across the source-root plan.
+After eligible streams are selected, construct the set of selected regular-file **paths** across the source-root plan.
 
-For each alias symlink:
+For each candidate alias symlink:
 
-- if its target regular identity is selected, attach a cleanup-only alias action to the archive plan that owns the target;
-- if the target is not selected, leave the alias unchanged.
+- resolve the symlink without treating inode equality as pathname ownership;
+- require the resolved pathname to be under the same source root;
+- require an exact discovered regular entry at that relative path;
+- require the resolved filesystem identity to match that discovered entry; and
+- only if that exact target path is selected, attach a cleanup-only alias action to the archive plan that owns the target.
+
+A hardlink outside the source root, or a different in-source hardlink pathname that is not the selected target path, does not authorize alias cleanup.
 
 The alias modification time does not affect plan eligibility or archive display bounds.
 
@@ -258,6 +264,8 @@ For each cleanup-only alias:
 
 If a source changed, stop cleanup for the affected transaction and report the preserved state.
 
+Cleanup does not recursively remove empty source directories. Directories are not selected cleanup entries in the current contract, so even a directory made empty by selected-file removal remains present.
+
 #### Step 8 — Synchronize cleanup
 
 Synchronize every source directory whose entry set changed before marking cleanup complete durably.
@@ -377,13 +385,13 @@ Use three separate concepts:
 
 Used only to evaluate age eligibility in `plan`.
 
-CLI proposal:
+CLI:
 
 ```text
-stream-archiver plan --at <ISO-8601>
+stream-archiver plan [--at <ISO-8601>] [--json]
 ```
 
-The normal `plan` command uses the observed current clock.
+The normal `plan` command uses the observed current clock. The exported destructive `run_policy()` function also owns an observed clock and exposes no artificial-time parameter. A private deterministic helper is retained for behavior tests only.
 
 ### 8.2 Execution observation time
 
@@ -681,8 +689,9 @@ Prefer precise descriptions of the mechanism and its verified boundary.
 | R-SYSTEMD | §13 systemd design |
 | R-MOVE | §14 Logical move metadata contract |
 | R-DOC | §15 Documentation architecture |
+| R-PROG / R-CAP | §21 Runtime accounting and capacity design |
 
-## 17. Implementation sequence used for 0.4.0a1
+## 17. Retained 0.4.0a1 implementation sequence
 
 This sequence records the dependency order used for the 0.4.0a1 implementation.
 
@@ -698,7 +707,7 @@ This sequence records the dependency order used for the 0.4.0a1 implementation.
 10. Update systemd generation and operational docs.
 11. Run full source, installed-wheel, crash/fault, and deployment verification before beta promotion.
 
-## 18. Resolved decisions for 0.4.0a1
+## 18. Retained 0.4.0a1 foundation decisions
 
 The earlier draft uncertainties are closed as follows:
 
@@ -729,3 +738,148 @@ The 2026-09-13 review applies CPS 0.5.0-alpha.1 and Software Quality 0.4.0-alpha
 - treat source-tree tests, installed-package tests, systemd verification, and patch replay as different evidence surfaces.
 
 These controls do not change the product's archival scope. They change how the 0.4.0a1 implementation is structured and verified.
+
+
+## 20. 0.4.0a2 operator and boundary consolidation
+
+### 20.1 Configuration schema 3
+
+Schema 3 adds two orthogonal policy controls:
+
+```toml
+recursive = true
+stream_partition = "source-root"  # or "parent-directory"
+```
+
+`recursive` controls which filesystem entries are discovered. `stream_partition` controls which discovered boundary entries can be adjacent in one time stream. The two mechanisms remain independent. Schemas 1 and 2 retain `recursive=true` and `source-root` partitioning.
+
+Configured source and destination root paths are checked for a direct symlink object before canonicalization. After that check, canonical paths remain authoritative for overlap and lock-domain calculations.
+
+### 20.2 Archive layout remains relative-tree preserving
+
+Recursive discovery does not flatten output. Each payload object keeps its source-relative path, subject only to the existing documented compression suffix transformation/disambiguation. Multiple configured source roots remain separate archive plans even when they share one destination. No new destination namespace/layout mode is introduced in this candidate.
+
+### 20.3 Planning presentation boundary
+
+Planning state and rendering are separate responsibilities. `PolicyPlan` remains the immutable planning result. A presentation layer derives bounded aggregate statistics without changing selection:
+
+- policy/source/stream/archive counts;
+- selected regular-file count and input bytes;
+- move/gzip/bzip2 disposition;
+- preserved-link and cleanup-only-alias counts;
+- top file extensions with a bounded `other` bucket; and
+- per-source summary context.
+
+`plan` renders this human summary by default. `plan --json` retains the action-level machine representation. The approximate 40-line target is a reader-task design target, not a correctness threshold.
+
+### 20.4 Event-driven logging levels
+
+INFO is reserved for meaningful run/policy/source and eligible-stream/archive lifecycle transitions plus aggregate byte progress that arises naturally from staged work. Normal entry discovery, per-entry staging, hashing, revalidation, cleanup, and lock acquisition are DEBUG. WARNING and ERROR remain for degraded/failed states requiring operator awareness.
+
+No timer, heartbeat, rate limiter, suppression interval, or synthetic progress event exists to satisfy a logging cadence. Representative runs may measure the operator preference of roughly one useful INFO event per 1–10 seconds as a post-hoc usability heuristic only.
+
+Structured machine logs retain complete paths. Entry-level text events use relative paths where the source/archive root is already identified by surrounding lifecycle context. Failure diagnostics can include full paths when needed. `archive_action` identifies an archival action; `next_action` is reserved for remediation.
+
+### 20.5 Public lock ownership
+
+Public `run_policy`, `verify_policies`, `verify_destination`, and single-archive verification acquire the cooperative lock set required by their contract. Private helpers are used when the CLI already owns a broader multi-policy/state lock transaction. A public `resources_locked=True` assertion is not part of the supported API.
+
+### 20.6 Planning collision index
+
+Archive-path collision validation uses an index of exact payload objects and occupied parent prefixes. An ordinary conflict lookup is proportional to candidate path depth rather than to the number of previously selected payload objects. Fixed source-derived payload paths retain precedence; generated compression paths alone may be disambiguated.
+
+### 20.7 Safe generated deployment files
+
+`render-systemd --force` creates a temporary file in the output directory and replaces the output pathname with `os.replace`. This replaces an existing symlink object rather than opening and writing through its target.
+
+The guided installer resolves the source tree's exact declared package version and refuses installation when no matching wheel exists. Modification time is not a version-selection fallback.
+
+### 20.8 Documentation architecture
+
+The maintained user-facing layers are:
+
+- `README.md`: concise orientation, safety boundary, quick start, common commands;
+- `docs/user-guide.md`: mental model, configuration decisions, discovery/partition/layout, planning, logging, examples, FAQ;
+- `docs/operations.md`: deployment, permissions, systemd, recovery, upgrades;
+- `docs/verification.md`: maintainer/release evidence procedure;
+- `docs/requirements.md`: normative behavior; and
+- `docs/design.md`: selected mechanisms and rationale.
+
+Cross-links replace large duplicated explanations.
+
+### 20.9 Whole-package review corrections
+
+The second alpha incorporates the decision-ready findings from the 2026-09-27 CPS/SQG self-review. In addition to the operator changes, it removes unrelated empty-directory cleanup, strengthens exact-path alias classification, rejects root symlinks before canonicalization, closes public lock/clock bypasses, makes systemd output replacement symlink-safe, fails closed on mismatched installer wheels, and makes staging-cleanup failures visible.
+
+
+## 21. 0.4.0a3 runtime accounting and capacity design
+
+### 21.1 Invocation accounting boundary
+
+`service._run_policies_at` owns the top-level selected-work boundary. It performs pending-archive recovery before establishing new-work totals. It then plans every selected policy at one common planning reference time and freezes the archive-plan tuple before destructive processing. This makes stream, regular-file, and source-byte denominators stable for the invocation. It also means later policies in one invocation no longer acquire a later eligibility reference time merely because earlier policies took time to execute.
+
+The monotonic run clock starts when this orchestration starts. Recovery and planning therefore contribute to elapsed invocation runtime, while their work remains excluded from the newly selected stream/file/source-byte denominator.
+
+`run` uses this multi-policy orchestration directly. `run-if-due` first identifies the due subset, then executes that subset as one accounting boundary. Its completion callback persists each successful policy's due-state immediately, preserving the established partial-success behavior if a later due policy fails.
+
+### 21.2 Progress types and executor boundary
+
+`progress.py` contains the accounting model rather than a general event framework:
+
+- `RunTotals` is the immutable selected-work denominator;
+- `RunProgressSnapshot` is the structured observation;
+- `ExecutionProgressDelta` is the narrow executor-to-service byte observation; and
+- `RunProgressTracker` owns monotonic counters and elapsed time.
+
+The executor reports bytes that it actually reads from selected regular source files and the final logical payload size after each regular payload object is finalized. It does not decide log severity or invocation completion. The service marks selected files complete only after the archive transaction succeeds. A reconciliation path can finish selected work without rereading all bytes; transaction completion accounts any planned source-byte remainder while preserving the distinction between byte staging and file completion.
+
+The existing archive-local ten-percent INFO staging event remains available to direct executor callers. When service-level accounting supplies a progress sink, that local INFO event is suppressed so one operation does not produce two competing aggregate INFO progress streams. Per-entry success detail remains DEBUG.
+
+### 21.3 Work-triggered INFO progress
+
+The tracker can return a progress snapshot when processed source bytes cross a new ten-percent boundary below 100%. This boundary is triggered only by observed work. It is not a timer and does not attempt to enforce a wall-clock cadence. Start, stream start, stream completion, and run completion are explicit INFO lifecycle observations.
+
+### 21.4 Human size presentation
+
+`presentation.format_bytes` is the shared human formatter. It uses decimal SI divisors: 1000 B = 1 kB, 1000 kB = 1 MB, and so on. Values below 10 scaled units normally use two decimal digits; larger scaled values use one. Bytes remain integers. Structured progress/capacity fields always carry exact integers in addition to any display strings.
+
+This choice follows the requested `KB/MB/GB/TB`-style human convention while using the standards-consistent SI symbol `kB`. It avoids the previous proposal to display IEC units unless an explicit IEC contract is later adopted.
+
+### 21.5 Planning capacity observation
+
+`capacity.observe_capacity` uses `statvfs` and `f_bavail * f_frsize` (falling back to `f_bsize` when required) to observe bytes available to the process. If a destination does not yet exist, planning probes the nearest existing ancestor and does not create destination state. An `OSError` becomes a bounded `CapacityUnavailable` observation, not a synthetic zero-byte value.
+
+Planning aggregates selected regular source bytes by exact destination root. Human output shows the advisory comparison; `plan --json` retains exact selected, free, and total byte fields. Compression is deliberately not estimated, so the selected-source comparison is conservative for compressible content but can still be insufficient for incompressible transformed output, metadata, staging overlap, or concurrent filesystem use.
+
+### 21.6 Execution warning state
+
+Execution observes capacity before every selected stream. The comparison uses remaining selected source bytes for that exact destination. `CapacityWarningTracker` stores only semantic warning state:
+
+- first insufficient observation -> warning;
+- repeated equivalent insufficient observation -> no new warning;
+- return to sufficient -> reset;
+- later insufficient observation -> warning again;
+- first unavailable observation -> warning; repeated unavailable observations remain quiet until a successful observation resets that state; and
+- an insufficient shortfall that worsens by at least `max(64 MiB, 5% of last warned shortfall)` -> another warning.
+
+No wall-clock state participates in de-duplication. The threshold is an operator-noise policy, not a safe-space margin.
+
+### 21.7 Post-stream unexpected-capacity diagnostic
+
+For a newly created committed archive, the service can compare free bytes before and after the transaction with POSIX block allocation measured as `st_blocks * 512` over the committed archive tree using `lstat` without following symlinks. If block counts are not available, the diagnostic is omitted.
+
+The diagnostic computes:
+
+`observed_loss = max(0, free_before - free_after)`
+
+`residual = max(0, observed_loss - known_archive_allocation)`
+
+A residual is material at `max(64 MiB, 5% of known_archive_allocation)`. The log event calls this residual **unexpected destination capacity consumption**. It does not identify an external writer or any other cause. The calculation is intentionally diagnostic because filesystem metadata, allocation timing, snapshots, quotas, concurrent activity, and other storage behavior can change free-space observations.
+
+### 21.8 Failure and safety behavior
+
+Capacity checks do not reserve blocks and do not stop a stream solely because the advisory comparison is low or unavailable. Normal filesystem failures, including `ENOSPC`, continue through the existing execution failure path. Source deletion remains behind committed verification and source revalidation. The progress and capacity code therefore adds observability but does not weaken the archive transaction.
+
+### 21.9 Rejected alternatives
+
+This candidate does not add a timer/heartbeat, INFO rate limiter, periodic status thread, capacity reservation, hard low-space execution gate, output-size predictor, causal external-writer warning, generalized event bus, or persistent invocation ordinal. These mechanisms would either exceed the accepted `0.4.0a3` scope or require evidence and contracts not currently available.

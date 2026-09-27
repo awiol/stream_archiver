@@ -160,20 +160,16 @@ if [[ -n $PROJECT_VERSION ]]; then
     shopt -u nullglob
 fi
 
-if [[ ${#MATCHING_WHEELS[@]} -gt 0 ]]; then
-    CANDIDATE_WHEELS=("${MATCHING_WHEELS[@]}")
-else
-    CANDIDATE_WHEELS=("${WHEELS[@]}")
-    if [[ -n $PROJECT_VERSION ]]; then
-        printf \
-            'No wheel matches project version %s; selecting the newest available wheel.\n' \
-            "$PROJECT_VERSION" >&2
-    else
-        printf \
-            'Could not read the project version; selecting the newest available wheel.\n' \
-            >&2
-    fi
+if [[ -z $PROJECT_VERSION ]]; then
+    printf 'Could not read the project version from pyproject.toml; refusing installation.\n' >&2
+    exit 2
 fi
+if [[ ${#MATCHING_WHEELS[@]} -eq 0 ]]; then
+    printf 'No wheel matches project version %s; build the exact project wheel first.\n' \
+        "$PROJECT_VERSION" >&2
+    exit 2
+fi
+CANDIDATE_WHEELS=("${MATCHING_WHEELS[@]}")
 
 WHEEL=${CANDIDATE_WHEELS[0]}
 for CANDIDATE in "${CANDIDATE_WHEELS[@]:1}"; do

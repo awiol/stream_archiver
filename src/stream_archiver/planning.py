@@ -6,10 +6,12 @@ import hashlib
 import json
 import logging
 import os
+import stat
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from stream_archiver.config import CompressionCodec, Policy, SymlinkRule
+from stream_archiver.config import CompressionCodec, Policy, StreamPartition, SymlinkRule
 from stream_archiver.errors import PlanningError
 from stream_archiver.model import (
     ActionKind,
@@ -61,6 +63,44 @@ def split_streams(entries: tuple[Entry, ...], *, minimum_gap: timedelta) -> tupl
     return result
 
 
+def split_partitioned_streams(
+    entries: tuple[Entry, ...],
+    *,
+    minimum_gap: timedelta,
+    partition: StreamPartition,
+) -> tuple[Stream, ...]:
+    """Split boundary entries within the configured grouping domain.
+
+    ``source-root`` preserves the historical behavior. ``parent-directory``
+    prevents timestamp adjacency in one directory from merging a stream in a
+    different exact relative parent directory.
+    """
+
+    if partition is StreamPartition.SOURCE_ROOT:
+        return split_streams(entries, minimum_gap=minimum_gap)
+    if partition is not StreamPartition.PARENT_DIRECTORY:
+        raise PlanningError(f"unsupported stream partition: {partition}")
+
+    grouped: dict[Path, list[Entry]] = {}
+    for entry in entries:
+        grouped.setdefault(entry.relative_path.parent, []).append(entry)
+    streams = [
+        stream
+        for parent in sorted(grouped, key=lambda item: item.as_posix())
+        for stream in split_streams(tuple(grouped[parent]), minimum_gap=minimum_gap)
+    ]
+    return tuple(
+        sorted(
+            streams,
+            key=lambda stream: (
+                stream.oldest_mtime_ns,
+                stream.newest_mtime_ns,
+                stream.entries[0].relative_path.as_posix(),
+            ),
+        )
+    )
+
+
 def select_eligible_streams(
     streams: tuple[Stream, ...], *, now: datetime, minimum_age: timedelta
 ) -> tuple[Stream, ...]:
@@ -102,18 +142,14 @@ def build_archive_plan(
         raise PlanningError(f"source is not owned by policy {policy.name!r}: {source_root}")
 
     all_entries = source_entries if source_entries is not None else stream.entries
-    source_regular_identities = {
-        (entry.identity.device, entry.identity.inode)
-        for entry in all_entries
-        if entry.kind is EntryKind.REGULAR
+    regular_entries = {
+        entry.relative_path: entry for entry in all_entries if entry.kind is EntryKind.REGULAR
     }
-    selected_regular_identities = {
-        (entry.identity.device, entry.identity.inode)
-        for entry in stream.entries
-        if entry.kind is EntryKind.REGULAR
+    selected_regular_paths = {
+        entry.relative_path for entry in stream.entries if entry.kind is EntryKind.REGULAR
     }
     actions = tuple(
-        _plan_entry(policy, entry, source_regular_identities) for entry in stream.entries
+        _plan_entry(policy, source_root, entry, regular_entries) for entry in stream.entries
     )
     if policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE:
         selected_paths = {entry.relative_path for entry in stream.entries}
@@ -122,7 +158,8 @@ def build_archive_plan(
             for entry in all_entries
             if entry.kind is EntryKind.SYMLINK
             and entry.relative_path not in selected_paths
-            and _resolved_target_identity(entry.absolute_path) in selected_regular_identities
+            and _resolved_source_regular_target(entry.absolute_path, source_root, regular_entries)
+            in selected_regular_paths
         )
         actions += alias_actions
     actions = _resolve_archive_path_collisions(actions)
@@ -144,8 +181,7 @@ def build_archive_plan(
     payload_oldest = min(action.source.mtime_ns for action in payload_actions)
     payload_newest = max(action.source.mtime_ns for action in payload_actions)
     archive_name = (
-        f"{_format_timestamp(payload_oldest)}--"
-        f"{_format_timestamp(payload_newest)}--{plan_id[:10]}"
+        f"{_format_timestamp(payload_oldest)}--{_format_timestamp(payload_newest)}--{plan_id[:10]}"
     )
     log_event(
         LOGGER,
@@ -171,6 +207,7 @@ def build_archive_plan(
 
 def boundary_entries_for_policy(
     policy: Policy,
+    source_root: Path,
     entries: tuple[Entry, ...],
 ) -> tuple[Entry, ...]:
     """Return source entries whose timestamps define stream boundaries.
@@ -181,10 +218,8 @@ def boundary_entries_for_policy(
     their own modification times.
     """
 
-    regular_identities = {
-        (entry.identity.device, entry.identity.inode)
-        for entry in entries
-        if entry.kind is EntryKind.REGULAR
+    regular_entries = {
+        entry.relative_path: entry for entry in entries if entry.kind is EntryKind.REGULAR
     }
     boundary: list[Entry] = []
     for entry in entries:
@@ -193,23 +228,23 @@ def boundary_entries_for_policy(
             continue
         if policy.symlink_rule is SymlinkRule.IGNORE:
             continue
-        if entry.link_target is None or os.path.isabs(entry.link_target):
-            continue
         if (
             policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE
-            and _resolved_target_identity(entry.absolute_path) in regular_identities
+            and _resolved_source_regular_target(entry.absolute_path, source_root, regular_entries)
+            is not None
         ):
             continue
+        if entry.link_target is None or os.path.isabs(entry.link_target):
+            continue
         boundary.append(entry)
-    return tuple(
-        sorted(boundary, key=lambda item: (item.mtime_ns, item.relative_path.as_posix()))
-    )
+    return tuple(sorted(boundary, key=lambda item: (item.mtime_ns, item.relative_path.as_posix())))
 
 
 def _plan_entry(
     policy: Policy,
+    source_root: Path,
     entry: Entry,
-    regular_identities: set[tuple[int, int]],
+    regular_entries: dict[Path, Entry],
 ) -> PlannedAction:
     if entry.kind is EntryKind.REGULAR:
         codec = policy.compression_for(entry.relative_path)
@@ -230,35 +265,79 @@ def _plan_entry(
     if policy.symlink_rule is SymlinkRule.IGNORE:
         return PlannedAction(entry, ActionKind.SKIP_SYMLINK, None)
 
-    if policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE:
-        target_identity = _resolved_target_identity(entry.absolute_path)
-        if target_identity is not None and target_identity in regular_identities:
-            return PlannedAction(entry, ActionKind.DROP_ALIAS_SYMLINK, None)
+    if (
+        policy.symlink_rule is SymlinkRule.DROP_ALIASES_PRESERVE_RELATIVE
+        and _resolved_source_regular_target(entry.absolute_path, source_root, regular_entries)
+        is not None
+    ):
+        return PlannedAction(entry, ActionKind.DROP_ALIAS_SYMLINK, None)
 
     if entry.link_target is not None and not os.path.isabs(entry.link_target):
         return PlannedAction(entry, ActionKind.PRESERVE_SYMLINK, entry.relative_path)
     return PlannedAction(entry, ActionKind.SKIP_SYMLINK, None)
 
 
-def _resolved_target_identity(path: Path) -> tuple[int, int] | None:
+def _resolved_source_regular_target(
+    symlink_path: Path,
+    source_root: Path,
+    regular_entries: dict[Path, Entry],
+) -> Path | None:
+    """Return the exact in-source regular target path for one alias symlink.
+
+    Filesystem identity alone is insufficient because different hardlink paths
+    can share one inode while only one pathname is selected. The resolved target
+    must be inside the source root and must match the discovered regular entry at
+    that exact relative path.
+    """
+
     try:
-        metadata = path.stat()
-    except (FileNotFoundError, OSError):
+        canonical_root = source_root.resolve(strict=True)
+        target = symlink_path.resolve(strict=True)
+        relative = target.relative_to(canonical_root)
+        metadata = target.stat()
+    except (OSError, ValueError):
         return None
-    return metadata.st_dev, metadata.st_ino
+    entry = regular_entries.get(relative)
+    if entry is None or not stat.S_ISREG(metadata.st_mode):
+        return None
+    if (metadata.st_dev, metadata.st_ino) != (entry.identity.device, entry.identity.inode):
+        return None
+    return relative
+
+
+@dataclass(slots=True)
+class _ArchivePathIndex:
+    """Index archive objects and occupied directory prefixes by relative path."""
+
+    objects: dict[Path, Path] = field(default_factory=dict)
+    descendants: dict[Path, tuple[Path, Path]] = field(default_factory=dict)
+
+    def conflict(self, candidate: Path) -> tuple[Path, Path] | None:
+        """Return one existing object that conflicts with ``candidate``."""
+
+        if candidate in self.objects:
+            return candidate, self.objects[candidate]
+        descendant = self.descendants.get(candidate)
+        if descendant is not None:
+            return descendant
+        for parent in candidate.parents:
+            source = self.objects.get(parent)
+            if source is not None:
+                return parent, source
+        return None
+
+    def add(self, path: Path, source: Path) -> None:
+        """Record one payload object and the directory prefixes it occupies."""
+
+        self.objects[path] = source
+        for parent in path.parents:
+            self.descendants.setdefault(parent, (path, source))
 
 
 def _resolve_archive_path_collisions(
     actions: tuple[PlannedAction, ...],
 ) -> tuple[PlannedAction, ...]:
-    """Keep fixed payload paths stable and disambiguate generated compression paths.
-
-    Compression appends ``.gz`` or ``.bz2``. A source tree can already contain
-    that filename, for example both ``data.json`` and ``data.json.gz``. Aborting
-    the complete stream is unnecessary because the manifest records the final
-    payload path. Fixed move/symlink paths remain unchanged; only generated
-    compressed paths may receive a deterministic disambiguation suffix.
-    """
+    """Keep fixed payload paths stable and disambiguate generated compression paths."""
 
     payload_kinds = {
         ActionKind.MOVE,
@@ -267,15 +346,15 @@ def _resolve_archive_path_collisions(
         ActionKind.PRESERVE_SYMLINK,
     }
     fixed_kinds = {ActionKind.MOVE, ActionKind.PRESERVE_SYMLINK}
-    owners: dict[Path, Path] = {
-        path: Path(f"<reserved:{path.name}>") for path in _RESERVED_ARCHIVE_PATHS
-    }
+    index = _ArchivePathIndex()
+    for path in _RESERVED_ARCHIVE_PATHS:
+        index.add(path, Path(f"<reserved:{path.name}>"))
 
     for action in actions:
         if action.kind not in fixed_kinds:
             continue
         assert action.archive_path is not None
-        conflict = _find_archive_path_conflict(action.archive_path, owners)
+        conflict = index.conflict(action.archive_path)
         if conflict is not None:
             previous_path, previous_source = conflict
             _raise_fixed_archive_collision(
@@ -283,7 +362,7 @@ def _resolve_archive_path_collisions(
                 previous_path=previous_path,
                 action=action,
             )
-        owners[action.archive_path] = action.source.relative_path
+        index.add(action.archive_path, action.source.relative_path)
 
     resolved: list[PlannedAction] = []
     for action in actions:
@@ -294,38 +373,25 @@ def _resolve_archive_path_collisions(
         assert action.archive_path is not None
         desired = action.archive_path
         selected = desired
-        if _find_archive_path_conflict(selected, owners) is not None:
-            selected = _disambiguated_compression_path(action, owners)
+        if index.conflict(selected) is not None:
+            selected = _disambiguated_compression_path(action, index)
             log_event(
                 LOGGER,
-                logging.INFO,
+                logging.DEBUG,
                 "archive_path_disambiguated",
                 "compressed payload path changed to avoid an archive collision",
                 source_path=action.source.relative_path,
                 desired_archive_path=desired,
                 selected_archive_path=selected,
-                action=action.kind.value,
+                archive_action=action.kind.value,
             )
-        owners[selected] = action.source.relative_path
+        index.add(selected, action.source.relative_path)
         resolved.append(PlannedAction(action.source, action.kind, selected))
 
     return tuple(resolved)
 
 
-def _find_archive_path_conflict(
-    candidate: Path, owners: dict[Path, Path]
-) -> tuple[Path, Path] | None:
-    for previous_path, previous_source in owners.items():
-        if (
-            candidate == previous_path
-            or candidate in previous_path.parents
-            or previous_path in candidate.parents
-        ):
-            return previous_path, previous_source
-    return None
-
-
-def _disambiguated_compression_path(action: PlannedAction, owners: dict[Path, Path]) -> Path:
+def _disambiguated_compression_path(action: PlannedAction, index: _ArchivePathIndex) -> Path:
     assert action.archive_path is not None
     codec_suffix = ".gz" if action.kind is ActionKind.GZIP else ".bz2"
     source_name = action.source.relative_path.name
@@ -337,7 +403,7 @@ def _disambiguated_compression_path(action: PlannedAction, owners: dict[Path, Pa
 
     candidate = parent / base_name
     counter = 1
-    while _find_archive_path_conflict(candidate, owners) is not None:
+    while index.conflict(candidate) is not None:
         candidate = parent / (f"{source_name}.stream-archiver-{digest}-{counter}{codec_suffix}")
         counter += 1
     return candidate
@@ -356,7 +422,7 @@ def _raise_fixed_archive_collision(
         first_archive_path=previous_path,
         second_source_path=action.source.relative_path,
         second_archive_path=action.archive_path,
-        action=(
+        next_action=(
             "rename one source path or change the symlink policy so the archive tree "
             "has one filesystem object at each path"
         ),

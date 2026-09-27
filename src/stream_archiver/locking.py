@@ -105,7 +105,7 @@ def resource_locks(
             owned.append((descriptor, request))
         log_event(
             LOGGER,
-            logging.INFO,
+            logging.DEBUG,
             "resource_locks_acquired",
             "cooperative filesystem resource locks acquired",
             operation="lock",

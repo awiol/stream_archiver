@@ -11,15 +11,23 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from stream_archiver.capacity import (
+    CapacityObservation,
+    CapacitySnapshot,
+    CapacityUnavailable,
+    observe_capacity,
+    selected_source_bytes_by_destination,
+)
 from stream_archiver.config import AppConfig, Policy, load_config
 from stream_archiver.errors import ConfigurationError, StreamArchiverError
 from stream_archiver.locking import resource_locks
 from stream_archiver.observability import configure_logging, log_event, start_run_context
+from stream_archiver.presentation import format_bytes, render_plan_summary
 from stream_archiver.service import (
     PolicyPlan,
     PolicyRunResult,
+    _run_policies_locked,
     plan_policy,
-    run_policy,
     verify_policies,
 )
 from stream_archiver.state import load_state, policy_fingerprint, save_state
@@ -79,7 +87,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "plan":
             now = _parse_planning_time(arguments.at)
             plans = [plan_policy(policy, now=now) for policy in policies]
-            _print_json([_plan_summary(plan) for plan in plans])
+            archive_plans = tuple(archive for plan in plans for archive in plan.archive_plans)
+            destination_bytes = selected_source_bytes_by_destination(archive_plans)
+            capacities = {
+                destination: observe_capacity(destination) for destination in destination_bytes
+            }
+            _log_planning_capacity(capacities, destination_bytes)
+            if arguments.json:
+                _print_json(
+                    [
+                        _plan_summary(
+                            plan,
+                            capacity=capacities.get(plan.destination_root),
+                            selected_source_bytes=destination_bytes.get(plan.destination_root, 0),
+                        )
+                        for plan in plans
+                    ]
+                )
+            else:
+                sys.stdout.write(
+                    render_plan_summary(plans, reference_time=now, capacities=capacities)
+                )
             log_event(
                 LOGGER,
                 logging.INFO,
@@ -158,10 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         with resource_locks(resources, exclusive=True):
             if arguments.command == "run":
-                now = datetime.now(UTC)
-                results = [
-                    run_policy(policy, now=now, resources_locked=True) for policy in policies
-                ]
+                results = list(_run_policies_locked(policies))
                 _print_json([_run_summary(result) for result in results])
                 log_event(
                     LOGGER,
@@ -181,7 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             logging.WARNING,
             "interrupted",
             "operation interrupted by the user",
-            action="rerun the same command; committed archives are recovered safely",
+            next_action="rerun the same command; committed archives are reconciled on retry",
         )
         return 130
     except StreamArchiverError as exc:
@@ -193,7 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=arguments.command,
             error_type=type(exc).__name__,
             detail=str(exc),
-            action="inspect preceding logs, correct the reported condition, and rerun",
+            next_action="inspect preceding logs, correct the reported condition, and rerun",
         )
         return 2
     except Exception:
@@ -236,7 +261,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--log-format",
         choices=("text", "json"),
         default="text",
-        help="operational log format; command results remain JSON on stdout",
+        help="operational log format; command results are separate from stderr logs",
     )
     parser.add_argument(
         "--verbose",
@@ -250,6 +275,11 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--at",
         help="read-only ISO-8601 planning reference time; defaults to current UTC",
+    )
+    plan.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the complete action-level plan as JSON instead of the human summary",
     )
     verify = subparsers.add_parser("verify", help="recompute archive hashes and success evidence")
     verify.add_argument(
@@ -304,8 +334,12 @@ def _run_if_due(
     state_path: Path,
     now: datetime,
 ) -> int:
+    """Execute all due policies with one selected-work progress denominator."""
+
     state = load_state(state_path)
-    summaries: list[dict[str, object]] = []
+    statuses: dict[str, dict[str, object]] = {}
+    due_policies: list[Policy] = []
+    fingerprints: dict[str, str] = {}
     for index, policy in enumerate(policies, start=1):
         fingerprint = policy_fingerprint(policy)
         due = state.is_due(
@@ -324,24 +358,44 @@ def _run_if_due(
             due=due,
         )
         if not due:
-            summaries.append({"policy": policy.name, "status": "not-due"})
+            statuses[policy.name] = {"policy": policy.name, "status": "not-due"}
             continue
-        result = run_policy(policy, now=now, resources_locked=True)
-        state = state.with_success(policy.name, when=datetime.now(UTC), fingerprint=fingerprint)
-        save_state(state_path, state)
-        summary = _run_summary(result)
-        summary["status"] = "completed"
-        summaries.append(summary)
-        log_event(
-            LOGGER,
-            logging.INFO,
-            "due_policy_completed",
-            "scheduled policy completed and due state was persisted",
-            policy=policy.name,
-            archives=len(result.archives),
-            state=state_path,
+        due_policies.append(policy)
+        fingerprints[policy.name] = fingerprint
+
+    if due_policies:
+
+        def policy_completed(result: PolicyRunResult) -> None:
+            """Persist due state immediately after each successfully completed policy."""
+
+            nonlocal state
+            fingerprint = fingerprints[result.policy_name]
+            state = state.with_success(
+                result.policy_name,
+                when=datetime.now(UTC),
+                fingerprint=fingerprint,
+            )
+            save_state(state_path, state)
+            summary = _run_summary(result)
+            summary["status"] = "completed"
+            statuses[result.policy_name] = summary
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "due_policy_completed",
+                "scheduled policy completed and due state was persisted",
+                policy=result.policy_name,
+                archives=len(result.archives),
+                state=state_path,
+            )
+
+        _run_policies_locked(
+            tuple(due_policies),
+            planning_time=now,
+            on_policy_completed=policy_completed,
         )
-    _print_json(summaries)
+
+    _print_json([statuses[policy.name] for policy in policies])
     return 0
 
 
@@ -445,6 +499,8 @@ def _config_summary(config: AppConfig) -> dict[str, object]:
                 "minimum_age_seconds": int(policy.minimum_age.total_seconds()),
                 "stream_gap_seconds": int(policy.stream_gap.total_seconds()),
                 "symlink_rule": policy.symlink_rule.value,
+                "recursive": policy.recursive,
+                "stream_partition": policy.stream_partition.value,
                 "compression_rules": [
                     {
                         "suffixes": list(rule.suffixes),
@@ -459,8 +515,15 @@ def _config_summary(config: AppConfig) -> dict[str, object]:
     }
 
 
-def _plan_summary(plan: PolicyPlan) -> dict[str, object]:
-    return {
+def _plan_summary(
+    plan: PolicyPlan,
+    *,
+    capacity: CapacityObservation | None = None,
+    selected_source_bytes: int = 0,
+) -> dict[str, object]:
+    """Return the action-level machine plan plus optional destination capacity."""
+
+    summary: dict[str, object] = {
         "policy": plan.policy_name,
         "discovered_entries": plan.discovered_entries,
         "streams": plan.streams,
@@ -498,6 +561,73 @@ def _plan_summary(plan: PolicyPlan) -> dict[str, object]:
             for source_plan in plan.source_plans
         ],
     }
+    if isinstance(capacity, CapacitySnapshot):
+        summary["destination_capacity"] = {
+            "destination": str(capacity.destination),
+            "available": True,
+            "selected_source_bytes": selected_source_bytes,
+            "free_bytes": capacity.free_bytes,
+            "total_bytes": capacity.total_bytes,
+            "insufficient": capacity.free_bytes < selected_source_bytes,
+            "observed_at": capacity.observed_at.isoformat().replace("+00:00", "Z"),
+        }
+    elif isinstance(capacity, CapacityUnavailable):
+        summary["destination_capacity"] = {
+            "destination": str(capacity.destination),
+            "available": False,
+            "selected_source_bytes": selected_source_bytes,
+            "reason": capacity.reason,
+            "observed_at": capacity.observed_at.isoformat().replace("+00:00", "Z"),
+        }
+    return summary
+
+
+def _log_planning_capacity(
+    capacities: dict[Path, CapacityObservation],
+    selected_bytes: dict[Path, int],
+) -> None:
+    """Emit exact planning-capacity observations and advisory warnings."""
+
+    for destination, source_bytes in selected_bytes.items():
+        observation = capacities[destination]
+        if isinstance(observation, CapacitySnapshot):
+            fields = {
+                "destination": destination,
+                "selected_source_bytes": source_bytes,
+                "free_bytes": observation.free_bytes,
+                "total_bytes": observation.total_bytes,
+                "selected_source": format_bytes(source_bytes),
+                "free": format_bytes(observation.free_bytes),
+                "observed_at": observation.observed_at,
+            }
+            if observation.free_bytes < source_bytes:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "planning_destination_capacity_low",
+                    "free destination capacity is below selected source volume",
+                    **fields,
+                )
+            else:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "planning_destination_capacity",
+                    "destination capacity observed for selected work",
+                    **fields,
+                )
+        elif isinstance(observation, CapacityUnavailable):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "planning_destination_capacity_unavailable",
+                "destination capacity could not be observed during planning",
+                destination=destination,
+                selected_source_bytes=source_bytes,
+                selected_source=format_bytes(source_bytes),
+                reason=observation.reason,
+                observed_at=observation.observed_at,
+            )
 
 
 def _verification_summary(result: object) -> dict[str, object]:

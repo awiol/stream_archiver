@@ -65,7 +65,19 @@ minimum retain tests for:
 - policy-scoped and destination-wide verification differ;
 - malformed archive-shaped directories are not silently skipped;
 - v1 due-state migration is conservatively due; and
-- policy fingerprint changes when archive selection/representation changes.
+- policy fingerprint changes when archive selection/representation changes;
+- public destructive execution rejects artificial eligibility time and lock-bypass assertions;
+- cleanup preserves unrelated/empty source directories;
+- exact-path alias classification rejects external/different hardlink identities;
+- schema-3 recursion and partitioning remain independent;
+- forced systemd output regeneration does not follow output symlinks; and
+- INFO logs retain archive/stream lifecycle while normal per-entry actions remain DEBUG;
+- invocation progress establishes stable multi-policy totals and reports exact source/written byte counters;
+- compressed written-payload accounting uses the final transformed object size;
+- planning and execution capacity comparisons preserve exact bytes and remain advisory;
+- repeated low-space warnings follow semantic state rather than elapsed time;
+- unexpected-capacity diagnostics use neutral causal wording; and
+- an `ENOSPC` after a sufficient advisory observation still fails through the normal execution path without false source cleanup.
 
 Where practical, execute the discriminating regression against the exact prior
 baseline and record that it fails in the expected way.
@@ -96,6 +108,8 @@ verify` on the generated service/timer when the tool is available.
 The release local-verification route automates a disposable generated-unit
 check through `tools/verify-systemd.py` when `systemd-analyze` is installed.
 
+Also verify that `render-systemd --force` replaces an output symlink itself and does not overwrite its target, and that the installer fails when no wheel matches the exact project version.
+
 Assert that generated 0.4 services:
 
 - do not contain operational `ConditionPath...` gates;
@@ -107,10 +121,14 @@ Assert that generated 0.4 services:
 
 For the 0.4 line, preserve executable evidence that:
 
-- completed supported 0.3 archives remain verifiable;
+- completed supported 0.3 and previous 0.4-alpha archives remain verifiable;
 - pending supported 0.3 archives enter corrected verify-before-delete recovery;
-- valid v1 scheduling state is readable and conservatively due; and
+- valid v1 scheduling state is readable and conservatively due;
+- schema-1/2 configurations retain recursive/source-root historical defaults;
+- schema-3 configurations expose the new discovery/partition controls; and
 - upgraded systemd deployments require regenerated units.
+
+For the human plan surface, verify representative summary arithmetic and inspect line density as a usability signal. The approximate 40-line summary target and 1–10 second INFO-density preference are not correctness gates.
 
 ## Release packaging verification
 

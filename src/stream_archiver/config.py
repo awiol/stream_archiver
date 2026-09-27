@@ -26,6 +26,13 @@ class SymlinkRule(StrEnum):
     IGNORE = "ignore"
 
 
+class StreamPartition(StrEnum):
+    """Supported boundaries for grouping discovered entries into time streams."""
+
+    SOURCE_ROOT = "source-root"
+    PARENT_DIRECTORY = "parent-directory"
+
+
 class CompressionCodec(StrEnum):
     """Supported per-file compression formats."""
 
@@ -104,6 +111,8 @@ class Policy:
     stream_gap: timedelta
     symlink_rule: SymlinkRule
     compression_rules: tuple[CompressionRule, ...]
+    recursive: bool = True
+    stream_partition: StreamPartition | str = StreamPartition.SOURCE_ROOT
 
     def __post_init__(self) -> None:
         """Reject unsafe programmatic policies before planning or execution."""
@@ -122,6 +131,16 @@ class Policy:
             raise ConfigurationError("every policy source must be an absolute Path")
         if not isinstance(self.destination, Path) or not self.destination.is_absolute():
             raise ConfigurationError("policy destination must be an absolute Path")
+
+        for source in self.sources:
+            if source.is_symlink():
+                raise ConfigurationError(
+                    f"policy source root must not be a symbolic link: {source}"
+                )
+        if self.destination.is_symlink():
+            raise ConfigurationError(
+                f"policy destination root must not be a symbolic link: {self.destination}"
+            )
 
         normalized_sources = tuple(source.resolve(strict=False) for source in self.sources)
         normalized_destination = self.destination.resolve(strict=False)
@@ -148,6 +167,14 @@ class Policy:
             raise ConfigurationError(
                 "policy compression_rules must be a tuple of CompressionRule objects"
             )
+        if not isinstance(self.recursive, bool):
+            raise ConfigurationError("policy recursive must be a boolean")
+        try:
+            partition = StreamPartition(self.stream_partition)
+        except (TypeError, ValueError) as exc:
+            choices = ", ".join(item.value for item in StreamPartition)
+            raise ConfigurationError(f"policy stream_partition must be one of: {choices}") from exc
+        object.__setattr__(self, "stream_partition", partition)
         _validate_suffix_ownership(self.compression_rules, f"policy {self.name!r}")
 
     def compression_for(self, relative_path: Path) -> CompressionCodec | None:
@@ -182,7 +209,7 @@ class AppConfig:
 
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "run_interval", "policies"})
-_POLICY_KEYS = frozenset(
+_POLICY_KEYS_BASE = frozenset(
     {
         "name",
         "source",
@@ -194,16 +221,18 @@ _POLICY_KEYS = frozenset(
         "compression_rules",
     }
 )
+_POLICY_KEYS_V3 = _POLICY_KEYS_BASE | frozenset({"recursive", "stream_partition"})
 _COMPRESSION_KEYS = frozenset({"suffixes", "compression"})
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 
 
 def load_config(path: Path) -> AppConfig:
     """Load and validate a TOML configuration file.
 
-    Schema version 2 documents the preferred ``sources = [...]`` form and both
-    gzip and bzip2. Version 1 and its singular ``source`` key remain accepted to
-    ease upgrades from stream-archiver 0.1.0.
+    Schema version 3 adds explicit recursive discovery and stream partitioning.
+    Schema version 2 introduced the preferred ``sources = [...]`` form and both
+    gzip and bzip2. Versions 1 and 2 remain accepted with their historical
+    discovery defaults.
     """
 
     log_event(
@@ -232,7 +261,10 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(raw_policies, list) or not raw_policies:
         raise ConfigurationError("configuration must contain at least one [[policies]] table")
 
-    policies = tuple(_parse_policy(item, index) for index, item in enumerate(raw_policies))
+    policies = tuple(
+        _parse_policy(item, index, schema_version=schema_version)
+        for index, item in enumerate(raw_policies)
+    )
     config = AppConfig(run_interval=run_interval, policies=policies)
     for policy in policies:
         log_event(
@@ -245,10 +277,12 @@ def load_config(path: Path) -> AppConfig:
             destination=policy.destination,
             compression_rules=len(policy.compression_rules),
             symlink_rule=policy.symlink_rule.value,
+            recursive=policy.recursive,
+            stream_partition=policy.stream_partition.value,
         )
     log_event(
         LOGGER,
-        logging.INFO,
+        logging.DEBUG,
         "configuration_loaded",
         "TOML configuration loaded successfully",
         path=path,
@@ -297,11 +331,12 @@ def _validate_source_roots(sources: tuple[tuple[str, Path], ...], *, context: st
                 )
 
 
-def _parse_policy(raw: Any, index: int) -> Policy:
+def _parse_policy(raw: Any, index: int, *, schema_version: int) -> Policy:
     context = f"policies[{index}]"
     if not isinstance(raw, dict):
         raise ConfigurationError(f"{context} must be a table")
-    _reject_unknown(raw, _POLICY_KEYS, context=context)
+    allowed = _POLICY_KEYS_V3 if schema_version >= 3 else _POLICY_KEYS_BASE
+    _reject_unknown(raw, allowed, context=context)
 
     name = _required_nonempty_string(raw, "name", context)
     sources = _source_paths(raw, context)
@@ -324,6 +359,17 @@ def _parse_policy(raw: Any, index: int) -> Policy:
         raise ConfigurationError(f"{context}.symlink_rule must be one of: {choices}") from exc
 
     compression_rules = _parse_compression_rules(raw.get("compression_rules", []), context)
+    recursive = raw.get("recursive", True)
+    if not isinstance(recursive, bool):
+        raise ConfigurationError(f"{context}.recursive must be a boolean")
+    partition_value = raw.get("stream_partition", StreamPartition.SOURCE_ROOT.value)
+    if not isinstance(partition_value, str):
+        raise ConfigurationError(f"{context}.stream_partition must be a string")
+    try:
+        stream_partition = StreamPartition(partition_value)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in StreamPartition)
+        raise ConfigurationError(f"{context}.stream_partition must be one of: {choices}") from exc
     return Policy(
         name=name,
         sources=sources,
@@ -332,6 +378,8 @@ def _parse_policy(raw: Any, index: int) -> Policy:
         stream_gap=stream_gap,
         symlink_rule=symlink_rule,
         compression_rules=compression_rules,
+        recursive=recursive,
+        stream_partition=stream_partition,
     )
 
 
@@ -398,7 +446,7 @@ def _expanded_absolute_path(value: str, context: str) -> Path:
     path = Path(os.path.expandvars(os.path.expanduser(value)))
     if not path.is_absolute():
         raise ConfigurationError(f"{context} must be an absolute path")
-    return path.resolve(strict=False)
+    return path
 
 
 def _validate_disjoint_paths(source: Path, destination: Path, context: str) -> None:

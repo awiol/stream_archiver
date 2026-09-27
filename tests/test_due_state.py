@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from stream_archiver.config import Policy, SymlinkRule
+from stream_archiver.config import Policy, StreamPartition, SymlinkRule
 from stream_archiver.state import DueState, load_state, policy_fingerprint, save_state
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
@@ -87,7 +89,42 @@ def test_policy_fingerprint_changes_when_archive_semantics_change(tmp_path: Path
     assert policy_fingerprint(first) != policy_fingerprint(second)
 
 
-def _policy(tmp_path: Path, *, stream_gap: timedelta = timedelta(hours=8)) -> Policy:
+def test_policy_fingerprint_changes_with_discovery_semantics(tmp_path: Path) -> None:
+    """Schema-3 discovery and partition fields change scheduled selection identity."""
+
+    baseline = _policy(tmp_path)
+    top_level = _policy(tmp_path, recursive=False)
+    partitioned = _policy(tmp_path, partition=StreamPartition.PARENT_DIRECTORY)
+
+    assert policy_fingerprint(baseline) != policy_fingerprint(top_level)
+    assert policy_fingerprint(baseline) != policy_fingerprint(partitioned)
+
+
+def test_a1_v2_fingerprint_is_conservatively_mismatched_by_a2_defaults(tmp_path: Path) -> None:
+    """An a1 v2 state becomes due once because a2 fingerprints discovery semantics."""
+
+    policy = _policy(tmp_path)
+    legacy_payload = {
+        "sources": [str(source) for source in policy.sources],
+        "destination": str(policy.destination),
+        "minimum_age_microseconds": int(policy.minimum_age.total_seconds() * 1_000_000),
+        "stream_gap_microseconds": int(policy.stream_gap.total_seconds() * 1_000_000),
+        "symlink_rule": policy.symlink_rule.value,
+        "compression_rules": [],
+    }
+    encoded = json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode()
+    a1_fingerprint = "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    assert a1_fingerprint != policy_fingerprint(policy)
+
+
+def _policy(
+    tmp_path: Path,
+    *,
+    stream_gap: timedelta = timedelta(hours=8),
+    recursive: bool = True,
+    partition: StreamPartition = StreamPartition.SOURCE_ROOT,
+) -> Policy:
     source = (tmp_path / "source").resolve()
     destination = (tmp_path / "archive").resolve()
     return Policy(
@@ -98,4 +135,6 @@ def _policy(tmp_path: Path, *, stream_gap: timedelta = timedelta(hours=8)) -> Po
         stream_gap=stream_gap,
         symlink_rule=SymlinkRule.IGNORE,
         compression_rules=(),
+        recursive=recursive,
+        stream_partition=partition,
     )

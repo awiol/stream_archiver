@@ -1,7 +1,7 @@
 # Copy to /etc/stream-archiver/policies.toml and replace every path.
 # Durations use a positive integer followed by s, m, h, d, or w.
 
-schema_version = 2
+schema_version = 3
 
 # systemd may check daily, but a policy runs only after this interval has
 # elapsed since its last successful completion.
@@ -19,6 +19,10 @@ destination = "/srv/archive/application-output"
 minimum_age = "30d"
 stream_gap = "8h"
 symlink_rule = "drop-aliases-preserve-relative"
+# Recursive discovery is explicit in schema 3. Relative paths stay intact in archives.
+recursive = true
+# source-root preserves historical grouping; parent-directory prevents cross-directory streams.
+stream_partition = "source-root"
 
 [[policies.compression_rules]]
 suffixes = [".json"]
@@ -35,6 +39,8 @@ destination = "/srv/archive/application-output"
 minimum_age = "45d"
 stream_gap = "12h"
 symlink_rule = "preserve-relative"
+recursive = true
+stream_partition = "parent-directory"
 
 [[policies.compression_rules]]
 suffixes = [".json", ".html"]

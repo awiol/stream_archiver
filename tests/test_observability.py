@@ -9,7 +9,7 @@ from pathlib import Path
 
 from stream_archiver.config import Policy, SymlinkRule
 from stream_archiver.observability import configure_logging, log_event
-from stream_archiver.service import run_policy
+from stream_archiver.service import _run_policy_at
 from tests.helpers import write_at
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
@@ -52,24 +52,22 @@ def test_policy_run_logs_action_and_byte_progress(tmp_path: Path) -> None:
         compression_rules=(),
     )
 
-    result = run_policy(policy, now=NOW)
+    result = _run_policy_at(policy, planning_time=NOW)
 
     events = [json.loads(line) for line in output.getvalue().splitlines()]
     names = [event["event"] for event in events]
     assert result.archives[0].moved_files == 1
     assert "archive_action_started" in names
-    assert "archive_action_progress" in names
+    assert "run_progress" in names
     assert "archive_action_progress_debug" in names
     assert "source_cleanup_progress" in names
     assert "archive_execution_completed" in names
-    progress = next(event for event in events if event["event"] == "archive_action_progress")
-    assert progress["action_progress"] == "1/1"
-    assert progress["file_bytes"].endswith(f"/{3 * 1024 * 1024}")
-    assert progress["staging_bytes"].endswith(f"/{3 * 1024 * 1024}")
-    assert progress["staging_percent"] < 100
+    progress = next(event for event in events if event["event"] == "run_progress")
+    assert progress["stream_progress"] == "1/1"
+    assert progress["source_bytes_total"] == 3 * 1024 * 1024
+    assert 0 < progress["source_bytes_processed"] < progress["source_bytes_total"]
     completed = next(event for event in events if event["event"] == "archive_execution_completed")
     assert completed["transaction_percent"] == 100
-    assert 0 < progress["staging_percent"] < 100
     staged = next(event for event in events if event["event"] == "archive_action_completed")
     assert staged["percent"] == 100
     assert staged["staging_percent"] == 100
@@ -99,7 +97,7 @@ def test_cli_failure_log_is_actionable_and_stdout_remains_empty(
     assert status == 2
     assert captured.out == ""
     assert events[-1]["event"] == "operation_failed"
-    assert "action" in events[-1]
+    assert "next_action" in events[-1]
 
 
 def test_cli_json_events_share_one_run_id(tmp_path: Path, capsys: object) -> None:
@@ -189,3 +187,44 @@ def test_missing_source_log_has_structured_path_and_reason(tmp_path: Path, capsy
     assert unavailable["source"] == str(source)
     assert unavailable["reason"] == "missing"
     assert events[-1]["detail"].startswith("source directory does not exist:")
+
+
+def test_info_logs_stream_lifecycle_without_per_entry_noise(tmp_path: Path) -> None:
+    """INFO keeps important archive/stream actions while entry detail remains DEBUG.
+
+    The 1–10 second operator preference is intentionally not encoded as a timer
+    or acceptance threshold.  This test verifies semantic level assignment only.
+    """
+
+    output = io.StringIO()
+    configure_logging(level="INFO", format_name="json", stream=output)
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    destination.mkdir()
+    write_at(source / "a.bin", b"a" * (2 * 1024 * 1024), NOW - timedelta(days=40))
+    write_at(source / "b.bin", b"b" * (2 * 1024 * 1024), NOW - timedelta(days=40))
+    policy = Policy(
+        name="reports",
+        sources=(source,),
+        destination=destination,
+        minimum_age=timedelta(days=30),
+        stream_gap=timedelta(hours=8),
+        symlink_rule=SymlinkRule.IGNORE,
+        compression_rules=(),
+    )
+
+    _run_policy_at(policy, planning_time=NOW)
+
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    names = {event["event"] for event in events}
+    assert "archive_execution_started" in names
+    assert "archive_committed" in names
+    assert "committed_archive_verified" in names
+    assert "source_cleanup_started" in names
+    assert "archive_execution_completed" in names
+    assert "run_progress" in names
+    assert "archive_staging_progress" not in names
+    assert "archive_action_started" not in names
+    assert "archive_action_completed" not in names
+    assert "source_cleanup_progress" not in names
+    assert "source_cleanup_entry_removed" not in names

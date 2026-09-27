@@ -14,8 +14,12 @@ from stream_archiver.observability import log_event, quote_path
 LOGGER = logging.getLogger(__name__)
 
 
-def discover_entries(source: Path) -> tuple[Entry, ...]:
-    """Return regular files and symlinks below ``source`` in deterministic order.
+def discover_entries(source: Path, *, recursive: bool = True) -> tuple[Entry, ...]:
+    """Return regular files and symlinks from ``source`` in deterministic order.
+
+    ``recursive=True`` traverses real descendant directories. ``False`` limits
+    discovery to entries directly under the source root. Directory symlinks are
+    recorded as symlinks but are never traversed in either mode.
 
     Directories, sockets, devices, and FIFOs are not archival candidates. A
     disappearing entry is ignored because discovery is only a snapshot; any
@@ -24,10 +28,11 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
 
     log_event(
         LOGGER,
-        logging.INFO,
+        logging.DEBUG,
         "discovery_started",
         "scanning source without following symlinks",
         source=source,
+        recursive=recursive,
     )
     _validate_source_directory(source)
 
@@ -64,7 +69,7 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
                 entries.append(_entry_from_stat(source, path, metadata))
             else:
                 retained_directories.append(name)
-        directory_names[:] = retained_directories
+        directory_names[:] = retained_directories if recursive else []
 
         for name in file_names:
             path = root / name
@@ -100,7 +105,7 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
     symlinks = len(ordered) - regular_files
     log_event(
         LOGGER,
-        logging.INFO,
+        logging.DEBUG,
         "discovery_completed",
         "source discovery completed",
         source=source,
@@ -109,6 +114,7 @@ def discover_entries(source: Path) -> tuple[Entry, ...]:
         symlinks=symlinks,
         disappeared=disappeared,
         skipped_special=skipped_special,
+        recursive=recursive,
     )
     return ordered
 
@@ -131,7 +137,7 @@ def _validate_source_directory(source: Path) -> None:
             "configured source directory does not exist",
             source=source,
             reason="missing",
-            action="create or correct the configured source path",
+            next_action="create or correct the configured source path",
         )
         raise ExecutionError(f"source directory does not exist: {quote_path(source)}") from exc
     except PermissionError as exc:
@@ -142,7 +148,7 @@ def _validate_source_directory(source: Path) -> None:
             "configured source directory is not accessible",
             source=source,
             reason="permission-denied-or-sandboxed",
-            action=(
+            next_action=(
                 "check directory traversal permissions and the generated systemd filesystem sandbox"
             ),
         )
@@ -179,7 +185,7 @@ def _validate_source_directory(source: Path) -> None:
         message,
         source=source,
         reason=reason,
-        action="configure a real directory as the source root",
+        next_action="configure a real directory as the source root",
     )
     raise ExecutionError(f"{message}: {quote_path(source)}")
 

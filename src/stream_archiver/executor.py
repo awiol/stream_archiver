@@ -24,6 +24,7 @@ from stream_archiver.durability import (
     sync_tree_directories,
 )
 from stream_archiver.errors import ExecutionError, RecoveryError
+from stream_archiver.locking import resource_locks
 from stream_archiver.model import (
     ActionKind,
     ArchivePlan,
@@ -32,6 +33,7 @@ from stream_archiver.model import (
     PlannedAction,
 )
 from stream_archiver.observability import log_event
+from stream_archiver.progress import ExecutionProgressDelta, ProgressSink
 
 LOGGER = logging.getLogger(__name__)
 
@@ -93,14 +95,23 @@ class _FileProgress:
     file_size: int
     overall_before: int
     overall_total: int
+    sink: ProgressSink | None = None
     completed: int = 0
-    next_info_percent: int = 10
-    next_debug_percent: int = 1
+    next_info_staging_percent: int = 10
+    next_debug_percent: int = 10
+
+    def __post_init__(self) -> None:
+        """Start aggregate INFO milestones after already-staged source bytes."""
+
+        current = _percentage(self.overall_before, self.overall_total)
+        self.next_info_staging_percent = ((current // 10) + 1) * 10
 
     def advance(self, amount: int) -> None:
         """Record copied source bytes and emit bounded debug and info milestones."""
 
         self.completed += amount
+        if self.sink is not None:
+            self.sink(ExecutionProgressDelta(source_bytes_processed=amount))
         if self.file_size <= 0:
             return
         percent = min(100, self.completed * 100 // self.file_size)
@@ -119,22 +130,24 @@ class _FileProgress:
                 percent=percent,
                 staging_percent=_percentage(overall, self.overall_total),
             )
-            self.next_debug_percent = percent + 1
-        if percent >= self.next_info_percent and percent < 100:
+            self.next_debug_percent = ((percent // 10) + 1) * 10
+        staging_percent = _percentage(overall, self.overall_total)
+        if (
+            self.sink is None
+            and staging_percent >= self.next_info_staging_percent
+            and staging_percent < 100
+        ):
             log_event(
                 LOGGER,
                 logging.INFO,
-                "archive_action_progress",
-                "file staging is making progress",
+                "archive_staging_progress",
+                "archive staging is making progress",
                 archive=self.archive_name,
-                source=self.source_path,
                 action_progress=f"{self.action_index}/{self.action_total}",
-                file_bytes=f"{self.completed}/{self.file_size}",
                 staging_bytes=f"{overall}/{self.overall_total}",
-                percent=percent,
-                staging_percent=_percentage(overall, self.overall_total),
+                staging_percent=staging_percent,
             )
-            self.next_info_percent = ((percent // 10) + 1) * 10
+            self.next_info_staging_percent = ((staging_percent // 10) + 1) * 10
 
 
 def _percentage(completed: int, total: int) -> int:
@@ -149,6 +162,7 @@ def execute_plan(
     plan: ArchivePlan,
     *,
     event_clock: Callable[[], datetime] | None = None,
+    progress_sink: ProgressSink | None = None,
 ) -> ArchiveExecutionResult:
     """Execute one staged move transaction for a source stream.
 
@@ -209,7 +223,12 @@ def execute_plan(
             archive=plan.archive_name,
             staging=staging_directory,
         )
-        manifest = _stage_plan(plan, staging_directory, _require_aware_utc(clock()))
+        manifest = _stage_plan(
+            plan,
+            staging_directory,
+            _require_aware_utc(clock()),
+            progress_sink=progress_sink,
+        )
         _write_manifest(staging_directory / MANIFEST_NAME, manifest)
         sync_tree_directories(staging_directory)
         os.replace(staging_directory, final_directory)
@@ -246,8 +265,6 @@ def execute_plan(
         _validate_all_sources(manifest, plan.source_root)
         cleanup_directories = _remove_sources(manifest, plan.source_root)
         sync_directories(cleanup_directories)
-        removed_directory_parents = _remove_empty_source_directories(plan.source_root)
-        sync_directories(removed_directory_parents)
         manifest["cleanup_complete"] = True
         manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(clock()))
         _write_manifest(final_directory / MANIFEST_NAME, manifest)
@@ -268,7 +285,7 @@ def execute_plan(
         return result
     except (ExecutionError, RecoveryError):
         if staging_directory is not None and staging_directory.exists():
-            shutil.rmtree(staging_directory, ignore_errors=True)
+            _discard_staging_directory(staging_directory, archive=plan.archive_name)
         log_event(
             LOGGER,
             logging.ERROR,
@@ -277,13 +294,49 @@ def execute_plan(
             "reconcile committed archive and source state",
             archive=plan.archive_name,
             source=plan.source_root,
-            retry_safe="inspect pending archive and remaining sources before retry",
+            preserved_state="committed/source state may require reconciliation",
+            next_action="inspect the pending archive and remaining sources before retry",
+            retry_safe=False,
         )
         raise
     except OSError as exc:
         if staging_directory is not None and staging_directory.exists():
-            shutil.rmtree(staging_directory, ignore_errors=True)
+            _discard_staging_directory(staging_directory, archive=plan.archive_name)
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            "archive_execution_failed",
+            "archive transaction encountered a filesystem failure",
+            archive=plan.archive_name,
+            source=plan.source_root,
+            detail=str(exc),
+            preserved_state="committed/source state may require reconciliation",
+            next_action="inspect the committed archive and remaining source state before retry",
+            retry_safe=False,
+        )
         raise ExecutionError(f"filesystem operation failed for plan {plan.plan_id}: {exc}") from exc
+
+
+def _discard_staging_directory(path: Path, *, archive: str) -> None:
+    """Best-effort removal of an uncommitted staging directory with diagnostics."""
+
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "staging_cleanup_failed",
+            "failed transaction left an uncommitted staging directory",
+            archive=archive,
+            staging=path,
+            detail=str(exc),
+            preserved_state="source cleanup was not authorized by this staging cleanup",
+            next_action="inspect and remove the staging directory after confirming no process uses it",
+            retry_safe=False,
+        )
 
 
 def recover_pending_archives(
@@ -297,7 +350,7 @@ def recover_pending_archives(
     clock = event_clock or _observed_utc_now
     log_event(
         LOGGER,
-        logging.INFO,
+        logging.DEBUG,
         "recovery_scan_started",
         "scanning destination for pending cleanup",
         destination=destination_root,
@@ -307,7 +360,7 @@ def recover_pending_archives(
         if not destination_root.exists():
             log_event(
                 LOGGER,
-                logging.INFO,
+                logging.DEBUG,
                 "recovery_scan_completed",
                 "destination does not exist; no recovery was required",
                 destination=destination_root,
@@ -348,7 +401,7 @@ def recover_pending_archives(
                 _ensure_success_evidence(child, manifest)
         log_event(
             LOGGER,
-            logging.INFO,
+            logging.INFO if recovered else logging.DEBUG,
             "recovery_scan_completed",
             "pending cleanup scan completed",
             destination=destination_root,
@@ -365,6 +418,13 @@ def recover_pending_archives(
 
 
 def verify_archive(directory: Path) -> ArchiveVerificationResult:
+    """Verify one archive under the destination shared cooperative lock."""
+
+    with resource_locks((directory.parent,), exclusive=False):
+        return _verify_archive_unlocked(directory)
+
+
+def _verify_archive_unlocked(directory: Path) -> ArchiveVerificationResult:
     """Recompute archive hashes and validate completion evidence.
 
     Version-2 archives require a completed manifest, a matching SHA-256 index,
@@ -457,7 +517,13 @@ def _ensure_real_directory(path: Path) -> None:
         raise ExecutionError(f"expected a real directory: {path}")
 
 
-def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, Any]:
+def _stage_plan(
+    plan: ArchivePlan,
+    staging: Path,
+    now: datetime,
+    *,
+    progress_sink: ProgressSink | None = None,
+) -> dict[str, Any]:
     total_bytes = sum(
         action.source.identity.size
         for action in plan.actions
@@ -469,7 +535,7 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
         entry = action.source
         log_event(
             LOGGER,
-            logging.INFO,
+            logging.DEBUG,
             "archive_action_started",
             "staging archive action",
             archive=plan.archive_name,
@@ -488,13 +554,21 @@ def _stage_plan(plan: ArchivePlan, staging: Path, now: datetime) -> dict[str, An
             entry.identity.size,
             completed_bytes,
             total_bytes,
+            sink=progress_sink,
         )
-        records.append(_stage_action(action, staging, progress=progress.advance))
+        record = _stage_action(action, staging, progress=progress.advance)
+        records.append(record)
+        if (
+            progress_sink is not None
+            and entry.kind is EntryKind.REGULAR
+            and isinstance(record["archive_size"], int)
+        ):
+            progress_sink(ExecutionProgressDelta(written_payload_bytes=record["archive_size"]))
         if entry.kind is EntryKind.REGULAR:
             completed_bytes += entry.identity.size
         log_event(
             LOGGER,
-            logging.INFO,
+            logging.DEBUG,
             "archive_action_completed",
             "archive action staged and verified",
             archive=plan.archive_name,
@@ -609,25 +683,27 @@ def _write_regular_payload(
     try:
         metadata = os.fstat(source_fd)
         _assert_regular_identity(entry, metadata)
-        with os.fdopen(source_fd, "rb", closefd=False) as source_stream:
-            with destination.open("xb") as raw_destination:
-                if compression == "gzip":
-                    with gzip.GzipFile(
-                        filename="",
-                        mode="wb",
-                        compresslevel=COMPRESSION_LEVEL,
-                        fileobj=raw_destination,
-                        mtime=0,
-                    ) as output:
-                        _copy_and_hash(source_stream, output, source_hasher, progress)
-                elif compression == "bz2":
-                    _copy_bz2_and_hash(source_stream, raw_destination, source_hasher, progress)
-                elif compression is None:
-                    _copy_and_hash(source_stream, raw_destination, source_hasher, progress)
-                else:  # pragma: no cover - planner and manifest validation constrain codecs.
-                    raise ExecutionError(f"unsupported compression codec: {compression}")
-                raw_destination.flush()
-                os.fsync(raw_destination.fileno())
+        with (
+            os.fdopen(source_fd, "rb", closefd=False) as source_stream,
+            destination.open("xb") as raw_destination,
+        ):
+            if compression == "gzip":
+                with gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    compresslevel=COMPRESSION_LEVEL,
+                    fileobj=raw_destination,
+                    mtime=0,
+                ) as output:
+                    _copy_and_hash(source_stream, output, source_hasher, progress)
+            elif compression == "bz2":
+                _copy_bz2_and_hash(source_stream, raw_destination, source_hasher, progress)
+            elif compression is None:
+                _copy_and_hash(source_stream, raw_destination, source_hasher, progress)
+            else:  # pragma: no cover - planner and manifest validation constrain codecs.
+                raise ExecutionError(f"unsupported compression codec: {compression}")
+            raw_destination.flush()
+            os.fsync(raw_destination.fileno())
     finally:
         os.close(source_fd)
 
@@ -729,7 +805,7 @@ def _remove_sources(
     ]
     records.sort(
         key=lambda record: (
-            0 if record["source_kind"] == EntryKind.SYMLINK.value else 1,
+            0 if record["source_kind"] == EntryKind.REGULAR.value else 1,
             record["source_path"],
         )
     )
@@ -737,11 +813,11 @@ def _remove_sources(
         path = source_root / Path(record["source_path"])
         log_event(
             LOGGER,
-            logging.INFO,
+            logging.DEBUG,
             "source_cleanup_progress",
             "revalidating selected source entry before removal",
             phase="source_revalidation",
-            source_path=path,
+            source_path=Path(record["source_path"]),
             cleanup_progress=f"{index}/{len(records)}",
         )
         if not os.path.lexists(path):
@@ -752,11 +828,11 @@ def _remove_sources(
             changed_directories.add(path.parent)
             log_event(
                 LOGGER,
-                logging.INFO,
+                logging.DEBUG,
                 "source_cleanup_entry_removed",
                 "selected source entry removed after revalidation",
                 phase="source_cleanup",
-                source_path=path,
+                source_path=Path(record["source_path"]),
                 cleanup_progress=f"{index}/{len(records)}",
             )
         except OSError as exc:
@@ -789,8 +865,6 @@ def _recover_manifest(
         error_type=RecoveryError,
     )
     sync_directories(cleanup_directories)
-    removed_directory_parents = _remove_empty_source_directories(source_root)
-    sync_directories(removed_directory_parents)
     manifest["cleanup_complete"] = True
     if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
         manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(event_clock()))
@@ -892,7 +966,7 @@ def _verify_archive_payloads(
             archive=directory,
             payload_progress=f"{index}/{len(records)}",
             source=record["source_path"],
-            action=action.value,
+            archive_action=action.value,
         )
         if action in {ActionKind.DROP_ALIAS_SYMLINK, ActionKind.SKIP_SYMLINK}:
             continue
@@ -942,7 +1016,7 @@ def _ensure_success_evidence(directory: Path, manifest: dict[str, Any]) -> None:
 
     success_path = directory / SUCCESS_NAME
     if os.path.lexists(success_path):
-        verify_archive(directory)
+        _verify_archive_unlocked(directory)
         return
 
     _verify_archive_payloads(directory, manifest)
@@ -962,10 +1036,10 @@ def _ensure_success_evidence(directory: Path, manifest: dict[str, Any]) -> None:
     }
     _write_json(success_path, success)
     sync_directory(directory)
-    verify_archive(directory)
+    _verify_archive_unlocked(directory)
     log_event(
         LOGGER,
-        logging.INFO,
+        logging.DEBUG,
         "success_evidence_written",
         "final success evidence written after cleanup and fresh verification",
         archive=directory,
@@ -1277,24 +1351,6 @@ def _set_symlink_mtime(path: Path, mtime_ns: int) -> None:
     except (NotImplementedError, OSError):
         # Symlink timestamps are not part of the archive's behavioral contract.
         return
-
-
-def _remove_empty_source_directories(source_root: Path) -> set[Path]:
-    """Remove empty descendants and return parent directories whose namespace changed."""
-
-    changed: set[Path] = set()
-    directories = sorted(
-        (path for path in source_root.rglob("*") if path.is_dir() and not path.is_symlink()),
-        key=lambda path: len(path.parts),
-        reverse=True,
-    )
-    for directory in directories:
-        try:
-            directory.rmdir()
-            changed.add(directory.parent)
-        except OSError:
-            continue
-    return changed
 
 
 def _fsync_directory(path: Path) -> None:

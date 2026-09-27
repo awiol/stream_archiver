@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0a4 — 2026-09-28
+
+- Normalized the delivered alpha source with Ruff and resolved remaining Ruff diagnostics, including binding run-progress callbacks to their current stream.
+
+## 0.4.0a3 — 2026-09-27
+
+- Added invocation-level run progress with stable stream, regular-file, source-byte, written-payload-byte, and monotonic elapsed-runtime accounting across selected policies.
+- Selected policies in one destructive invocation now share one planning reference time; a stream that becomes eligible only while earlier selected work is executing waits for a later invocation instead of changing the current progress denominator.
+- Added advisory destination-capacity observations to `plan` and per-stream execution, including exact machine-readable byte fields and state-based warning de-duplication.
+- Added neutral diagnostics for material unexplained free-space loss after a committed stream without attributing the observation to an external writer.
+- Standardized human byte presentation on decimal SI units (`kB`, `MB`, `GB`, `TB`) while retaining exact integer bytes for machine data and comparisons.
+- Kept capacity checks advisory: low or unavailable observed space does not bypass normal filesystem errors or weaken committed verification, source revalidation, cleanup, or durability ordering.
+- Kept INFO work-triggered and stream/archive oriented; no timer, heartbeat, rate limiter, or cadence gate was introduced.
+
+## 0.4.0a2 — 2026-09-27
+
+- Added a concise human-readable `plan` summary and moved the complete action-level representation to explicit `plan --json`.
+- Added configuration schema 3 with independent `recursive` discovery and `stream_partition` (`source-root` or `parent-directory`) controls; schema 1/2 remain compatible with historical defaults.
+- Extended the v2 scheduling fingerprint with the new discovery controls; an existing 0.4.0a1 fingerprint therefore makes the policy conservatively due once after upgrade, then successful a2 execution stores the new fingerprint.
+- Rebalanced logging so meaningful archive/stream lifecycle and aggregate staging progress remain INFO while routine per-entry and lock mechanics are DEBUG. The 1–10 second INFO preference is documented only as a post-hoc usability heuristic, not a timer or gate.
+- Clarified that Stream Archiver creates no default log file: manual operational logs use stderr and generated systemd service logs are collected by journald.
+- Bounded source cleanup to selected entries; automatic cleanup no longer removes unrelated or newly empty source directories. Regular payload sources are removed before cleanup-only aliases.
+- Strengthened alias classification to require the exact resolved in-source target pathname plus matching identity, preventing external/different hardlinks from authorizing alias cleanup.
+- Removed public destructive artificial-time and cooperative-lock bypass parameters; exported mutation and verification APIs own their required locks.
+- Rejected configured root symlinks before canonicalization, made forced systemd regeneration replace output symlinks rather than write through them, and made the guided installer fail when no exact-version wheel exists.
+- Replaced quadratic archive-path collision scanning with a path-prefix index; fixed source-derived paths still take precedence over generated compression paths.
+- Added visible warnings when best-effort cleanup of failed staging directories cannot complete, and normalized failure diagnostics around `next_action`, preserved state, and retry safety.
+- Added `docs/user-guide.md`, reduced README to an orientation/quick-start role, simplified `.gitignore`, and reconciled requirements/design/operations/verification documentation with the reviewed implementation.
+
 ## 0.4.0a1 — 2026-09-13
 
 - Reordered normal and recovery cleanup so the final committed archive payload

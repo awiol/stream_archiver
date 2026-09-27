@@ -5,6 +5,7 @@ from stream_archiver.config import (
     CompressionCodec,
     CompressionRule,
     Policy,
+    StreamPartition,
     SymlinkRule,
     load_config,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CompressionRule",
     "Policy",
     "PolicyRunResult",
+    "StreamPartition",
     "SymlinkRule",
     "load_config",
     "run_policy",
@@ -26,4 +28,4 @@ __all__ = [
     "verify_policies",
 ]
 
-__version__ = "0.4.0a1"
+__version__ = "0.4.0a4"

@@ -1,10 +1,10 @@
 # Stream Archiver Requirements
 
-**Document version:** `0.4.0-alpha.2`
-**Target package development version:** `0.4.0a1`
-**Date:** 2026-09-13
-**Status:** implementation contract for the first 0.4 alpha candidate
-**Repository intent:** repository requirements; supersedes the 0.4.0-alpha.1 draft
+**Document version:** `0.4.0-alpha.4`
+**Target package development version:** `0.4.0a3`
+**Date:** 2026-09-27
+**Status:** implementation contract for the third 0.4 alpha candidate
+**Repository intent:** repository requirements; supersedes document version 0.4.0-alpha.3
 
 ## 1. Purpose
 
@@ -40,7 +40,7 @@ A **regular file** is a filesystem regular file discovered with `lstat()` semant
 
 ### 3.5 Alias symlink
 
-An **alias symlink** is a symlink whose resolved target identifies a regular file under the same source root by filesystem identity. Alias classification is source-root-wide and occurs before stream segmentation.
+An **alias symlink** is a symlink whose resolved pathname is an exact discovered regular-file pathname under the same source root and whose resolved target identity matches that discovered regular file. Filesystem identity alone is insufficient because distinct hardlink pathnames can share one inode. Alias classification occurs across the complete discovery domain before stream segmentation.
 
 ### 3.6 Boundary entry
 
@@ -50,7 +50,7 @@ Alias symlinks do not participate in stream segmentation. A symlink that the sel
 
 ### 3.7 Stream
 
-A **stream** is a maximal ordered sequence of boundary entries for one source root in which every adjacent modification-time gap is less than `stream_gap`.
+A **stream** is a maximal ordered sequence of boundary entries inside one configured stream-partition domain in which every adjacent modification-time gap is less than `stream_gap`. A partition domain never spans configured source roots.
 
 A gap greater than or equal to `stream_gap` starts a new stream.
 
@@ -107,7 +107,9 @@ Each policy must define:
 - one destination root;
 - `minimum_age`;
 - `stream_gap`;
-- one symlink rule; and
+- one symlink rule;
+- recursive-discovery behavior;
+- one stream-partition mode; and
 - zero or more compression rules.
 
 ### R-CONFIG-002 — Multiple sources share policy settings
@@ -124,7 +126,13 @@ The configuration validator must reject source/destination relationships that cr
 
 The system must canonicalize configured roots for overlap, ownership, and lock-domain decisions. A symlink alias to another configured root must not bypass these checks.
 
-### R-CONFIG-005 — Compression codecs
+### R-CONFIG-005 — Configuration schema evolution
+
+Schema versions 1 and 2 must remain readable with their historical discovery behavior: recursive traversal and source-root-wide stream partitioning.
+
+Schema version 3 must expose `recursive` and `stream_partition`. A configuration that uses either new field must declare schema version 3 so an older binary fails on the schema version rather than silently assigning different semantics.
+
+### R-CONFIG-006 — Compression codecs
 
 The only supported compression codecs are `gzip` and `bz2` unless a later requirements version adds another codec.
 
@@ -138,11 +146,15 @@ Discovery must use non-following filesystem inspection. Directory symlinks must 
 
 ### R-DISC-002 — Discovery failure visibility
 
-A missing, inaccessible, symlinked, or non-directory source root must cause an actionable failed operation. Discovery must not silently omit an inaccessible subtree that is required by the policy.
+A missing, inaccessible, symlinked, or non-directory source root must cause an actionable failed operation. A configured root symlink must be rejected before canonicalization hides the symlink object. Discovery must not silently omit an inaccessible subtree that is required by the policy.
 
-### R-STREAM-001 — Source-local segmentation
+### R-DISC-003 — Explicit recursive discovery
 
-Stream segmentation must operate independently for each source root.
+Schema-3 policies must expose `recursive = true|false`. Recursive discovery must traverse real descendant directories without following directory symlinks. Non-recursive discovery must consider entries directly under the source root and must not descend into real child directories.
+
+### R-STREAM-001 — Configurable source-local partitioning
+
+Stream segmentation must never combine configured source roots. Schema-3 policies must support `stream_partition = "source-root"` and `stream_partition = "parent-directory"`. `source-root` groups all boundary entries under one source root by time. `parent-directory` applies the same time-gap rule independently within each entry's exact relative parent directory.
 
 ### R-STREAM-002 — Exact gap boundary
 
@@ -283,6 +295,14 @@ The system must not record an archive as complete until:
 - final archive verification succeeds; and
 - final completion evidence has been written durably.
 
+### R-SAFE-009 — Bounded source namespace mutation
+
+Automatic cleanup must remove only source entries represented by selected cleanup actions. It must not recursively remove unrelated or pre-existing empty directories. A directory that becomes empty because its selected files were removed remains in place unless a later explicit directory-cleanup contract is added.
+
+### R-SAFE-010 — Cleanup dependency order
+
+Within one transaction, selected regular-file payload sources should be removed before cleanup-only alias symlinks. This ordering reduces the partial-failure state in which an alias has been removed while its selected target remains. Each entry must still pass its own final revalidation immediately before unlink.
+
 ## 11. Durability requirements
 
 ### R-DUR-001 — Declared durability model
@@ -369,6 +389,8 @@ Scheduling state must record a fingerprint of scheduling-relevant policy fields.
 
 A missing or changed fingerprint must make the policy due on the next evaluation, unless a documented migration rule explicitly says otherwise.
 
+The 0.4.0a2 fingerprint adds the effective recursive-discovery and stream-partition settings. A fingerprint written by 0.4.0a1 therefore mismatches conservatively on first a2 evaluation even when a schema-1/2 policy retains the historical defaults. The new fingerprint must be persisted only after successful completion.
+
 ### R-SCHED-003 — State migration
 
 The implementation must define migration behavior for state files that predate the policy fingerprint. The conservative default is to treat the policy as due.
@@ -419,7 +441,23 @@ A legacy `--lock-file` option may remain temporarily accepted for operator compa
 
 Operators upgrading from 0.3 must regenerate generated service units. Old units contain obsolete prerequisite and lock-file semantics and are not the 0.4 deployment contract.
 
-## 16. Logging and diagnostic requirements
+## 16. Planning and operator-output requirements
+
+### R-PLAN-001 — Human-readable default plan
+
+`stream-archiver plan` must produce a concise human-readable read-only summary by default. The summary must identify the planning reference time, snapshot limitation, source and stream counts, eligible streams, planned archives, selected regular-file count and input bytes, symlink/alias dispositions, compression/move dispositions, a bounded file-extension distribution, source/destination context, and an explicit no-mutation statement.
+
+The design target is approximately 40 lines for a representative one-policy configuration. This is an operator-usability target, not a correctness gate.
+
+### R-PLAN-002 — Explicit machine-readable detail
+
+`stream-archiver plan --json` must expose the complete action-level plan in machine-readable JSON. The 0.4.0a1 JSON structure should remain stable where the new functionality does not require an additive field.
+
+### R-PLAN-003 — Relative archive layout
+
+Archive payload paths must preserve source-relative structure. Recursive discovery must not flatten files from different source directories. Separate configured source roots must continue to produce separate archive plans and archive directories even when they share a destination root.
+
+## 17. Logging and diagnostic requirements
 
 ### R-LOG-001 — Output separation
 
@@ -461,9 +499,23 @@ A transaction-wide 100% completion indication must not be emitted before the arc
 
 ### R-LOG-006 — Actionable failure
 
-When known and safe to disclose, an operational failure must identify the failed operation, affected object, observed condition, preserved state, safe next action, and whether retry is safe.
+When known and safe to disclose, an operational failure must identify the failed operation, affected object, observed condition, preserved state, safe next action, and whether retry is safe. Remediation guidance must not be attached mechanically to ordinary successful events.
 
-## 17. systemd deployment requirements
+### R-LOG-007 — Level semantics
+
+INFO must describe important run, policy, source, stream/archive, recovery, and naturally occurring aggregate-progress events. Normal per-entry discovery, staging, hashing, revalidation, cleanup, and lock-detail events must be DEBUG unless the entry itself fails or requires operator attention.
+
+The project may measure representative active-workload INFO density against the operator preference of approximately one useful INFO event per 1–10 seconds. That range is a soft diagnostic heuristic only. The implementation must not add timer-driven messages, heartbeat logs, cadence suppression, rate limiting, or a release gate solely to satisfy the range.
+
+### R-LOG-008 — Stable semantic fields
+
+A field that identifies an archival operation must use a distinct concept such as `archive_action`. A field that tells an operator what to do after a failure must use `next_action`. The implementation must not overload one `action` field for both meanings.
+
+### R-LOG-009 — Human path context
+
+Machine-readable JSON logs must retain complete path values required for diagnosis. Human text logs should prefer relative entry paths once the applicable source/archive root is already identified by the surrounding event context. Failure diagnostics may include the full affected path when it materially improves remediation.
+
+## 18. systemd deployment requirements
 
 ### R-SYSTEMD-001 — Generated deployment
 
@@ -481,7 +533,23 @@ Generated units must grant only required filesystem access. When home-tree acces
 
 Installation must not start archival movement or enable the recurring timer without a separate operator decision after plan review and a successful manual validation run.
 
-## 18. Documentation requirements
+### R-SYSTEMD-005 — Safe generated-file replacement
+
+`render-systemd --force` must replace a generated output pathname itself. It must not follow an existing output symlink and overwrite the symlink target.
+
+### R-INSTALL-001 — Exact wheel selection
+
+The guided installer must install a wheel whose normalized project version matches the source tree's declared project version. If no exact-version wheel is available, installation must stop with an actionable error rather than selecting another wheel by modification time.
+
+### R-API-001 — Public destructive clock ownership
+
+The exported `run_policy()` API must use an observed execution clock and must not accept an artificial eligibility time. Deterministic artificial clocks used by tests must remain on private/internal surfaces.
+
+### R-API-002 — Public lock ownership
+
+Exported destructive and verification APIs must acquire their required cooperative resource locks themselves. Public callers must not be able to bypass the lock invariant through a `resources_locked` or equivalent assertion parameter.
+
+## 19. Documentation requirements
 
 ### R-DOC-001 — Requirements/design separation
 
@@ -499,9 +567,17 @@ README, requirements, design, operations guidance, CLI help, and diagnostics mus
 
 Documentation must not describe the system as `safe`, `durable`, `independently verified`, or equivalent unless the applicable requirement and evidence are named.
 
-## 19. 0.4 alpha acceptance gate
+### R-DOC-005 — Reader-task separation
 
-The first 0.4 alpha implementation must not be promoted until executable evidence covers at least:
+The README must remain a concise orientation and quick-start surface. A maintained user guide must explain the operational mental model, configuration decisions, discovery/partition behavior, relative path preservation, plan interpretation, logging, worked examples, and frequently misunderstood behaviors. Operations and verification material must remain in their specialized documents rather than being copied wholesale into the README.
+
+### R-DOC-006 — Executable examples
+
+Canonical configuration and command examples must use supported interfaces and must be exercised by automated parsing or command tests where practical.
+
+## 20. 0.4 alpha acceptance gate
+
+A 0.4 alpha candidate must not be promoted beyond its declared maturity until executable evidence covers the applicable items below:
 
 1. corrupt committed archive during pending cleanup preserves remaining source;
 2. committed archive verification precedes normal source cleanup;
@@ -518,11 +594,26 @@ The first 0.4 alpha implementation must not be promoted until executable evidenc
 13. completed supported 0.3 archives remain verifiable and pending 0.3 cleanup uses corrected ordering;
 14. source-tree and installed-wheel CLI tests pass on a declared supported Python version;
 15. generated systemd units pass `systemd-analyze verify` where that tool is available; and
-16. the exact delivery patch replays against the exact `0.3.4b1` source baseline and reproduces the target tree.
+16. the exact delivery patch replays against the exact previous delivered source baseline and reproduces the target tree;
+17. public destructive execution has no artificial-time or lock-bypass parameter;
+18. unrelated empty source directories survive selected-file cleanup;
+19. hardlink identity outside the exact selected in-source pathname cannot authorize alias cleanup;
+20. schema-3 recursion and stream-partition behavior is executable and schema-1/2 compatibility defaults remain intact;
+21. `render-systemd --force` does not follow an existing output symlink;
+22. installer wheel selection fails closed when the exact package version is absent;
+23. default `plan` output is human-readable and explicit `--json` retains action detail;
+24. INFO-level verification demonstrates archive/stream lifecycle visibility without normal per-entry events;
+25. invocation-level progress establishes stable stream/file/source-byte totals across selected policies;
+26. written-payload accounting uses final transformed object sizes while source-byte accounting remains exact;
+27. planning reports advisory destination capacity with exact machine-readable selected/free byte values;
+28. execution rechecks capacity before every selected stream and suppresses repeated warnings by semantic state rather than time;
+29. a low-space advisory does not become a hard execution gate and a later `ENOSPC` cannot produce false completion;
+30. material unexpected-capacity diagnostics use neutral causal wording and exact arithmetic; and
+31. source-tree and installed-wheel tests cover the `0.4.0a3` progress/capacity behavior on the final candidate.
 
 Regression tests for safety defects must demonstrate sensitivity to the corresponding pre-fix behavior when practical; a test that passes only on the corrected implementation is not by itself sensitivity evidence.
 
-## 20. Resolved design decisions for 0.4.0a1
+## 21. Foundation decisions resolved by 0.4.0a2
 
 The following decisions close the open items in the 0.4.0-alpha.1 draft:
 
@@ -532,4 +623,175 @@ The following decisions close the open items in the 0.4.0-alpha.1 draft:
 4. Destination-wide audit is spelled `stream-archiver verify --all-in-destination`.
 5. The policy fingerprint includes ordered canonical sources, canonical destination, `minimum_age`, `stream_gap`, symlink rule, and ordered compression rules. Logging and timer-presentation settings are excluded.
 
-These decisions are requirements for the `0.4.0a1` implementation; they are no longer open proposals.
+These foundation decisions remain requirements through `0.4.0a3`; they are no longer open proposals.
+
+
+## 22. 0.4.0a2 consolidation decisions
+
+1. The exact candidate advances to `0.4.0a2`; the target release core remains `0.4.0`.
+2. Configuration schema 3 owns `recursive` and `stream_partition`; schema 1/2 keep historical defaults.
+3. Recursive discovery and stream partitioning are independent. Archive layout continues to preserve source-relative paths and does not gain a flatten mode.
+4. Automatic cleanup no longer removes empty directories that are not explicit selected entries.
+5. Alias classification requires an exact resolved in-source regular-file pathname plus matching identity; inode equality alone is not sufficient.
+6. Public mutation/verification functions own their cooperative locking and do not expose a lock-bypass flag.
+7. `plan` is human-readable by default; `plan --json` is the explicit detailed machine interface.
+8. INFO is event-driven at meaningful archive/stream and aggregate-progress boundaries. The 1–10 second preference is only a measured operator heuristic, never a timer or gate.
+9. The README is a short entry point. `docs/user-guide.md` is the detailed user-facing mental-model/configuration/usage reference.
+
+
+## 23. 0.4.0a3 run progress and destination-capacity contract
+
+The following requirements adopt the corresponding provisional IDs from the
+`0.4.0a3` planning delta. They add operator accounting without changing the
+archive transaction, cleanup, or durability gates.
+
+### R-PROG-001 — Selected-work totals
+
+Before destructive processing of newly selected archive plans begins, a run must
+establish totals for at least selected archive/stream count, selected regular-file
+count, and selected regular source bytes. `run` and the due subset of
+`run-if-due` must use one invocation-level denominator across the selected
+policies. Recovery of a previously committed archive must remain separate from
+newly selected work. All selected policies in that invocation use one planning
+reference time.
+
+### R-PROG-002 — Run-level progress state
+
+During destructive execution, observable run progress must include, when
+applicable, current selected stream/archive index and total, completed regular
+files and selected total, processed regular source bytes and selected total,
+logical archive payload bytes written after compression/transformation, and
+elapsed runtime.
+
+A counter must have a documented denominator and semantic boundary. A selected
+regular file counts as completed only after its archive transaction completes
+successfully. Source-byte progress may advance while staging reads a file.
+Successful reconciliation of already-staged selected work may account the
+remaining planned source bytes at transaction completion so final progress
+reaches the selected denominator without claiming that those bytes were reread.
+
+### R-PROG-003 — Runtime clock
+
+Elapsed runtime must use a monotonic clock. Wall-clock changes must not make
+elapsed runtime decrease or jump. The run elapsed clock begins when top-level
+run orchestration starts, so recovery and planning performed before selected-work
+totals are frozen remain part of invocation runtime even though they do not
+increase the selected-work denominator.
+
+### R-PROG-004 — Written-byte semantics
+
+`written_payload_bytes` must mean logical bytes in finalized archive payload
+objects for newly selected regular files. For compressed regular files it must
+reflect compressed output bytes, not source bytes. Manifest, checksum, success
+evidence, and filesystem metadata must not be silently included. Filesystem
+allocated-space accounting used for capacity diagnosis must remain a different
+concept.
+
+### R-PROG-005 — Machine and human representations
+
+Structured output/log fields must preserve exact non-negative integer byte
+counts and numeric elapsed time. Human text may use compact units and duration
+formatting derived from those exact values. Human rendering must not control
+comparisons or machine semantics.
+
+### R-PROG-006 — Human size format
+
+The project must use one shared human-size formatter for plan summaries,
+capacity warnings, progress logs, and other operator-facing volume fields. For
+`0.4.0a3`, the formatter uses decimal SI divisors and the labels `B`, `kB`,
+`MB`, `GB`, `TB`, and `PB`. Scaled values should normally use one or two decimal
+digits. Exact bytes remain available in machine-readable fields.
+
+### R-PROG-007 — INFO progress semantics
+
+Important stream/archive lifecycle events and useful aggregate run progress may
+be INFO. Per-entry normal-success work must remain DEBUG. Aggregate INFO progress
+may be emitted when observed work crosses naturally occurring byte milestones.
+The approximate one-useful-INFO-event-per-1-to-10-seconds preference is a
+post-hoc usability heuristic only. It must not create a timer, heartbeat, sleep,
+rate limiter, suppression interval, or release gate.
+
+### R-CAP-001 — Planning capacity observation
+
+Read-only planning must attempt to observe available bytes for each exact
+destination with selected regular-file work when the platform can provide that
+information. A missing destination must be probed through its nearest existing
+ancestor without creating the destination.
+
+The plan must compare available bytes with selected regular source bytes for all
+selected work directed to that exact destination. If available bytes are less
+than selected source bytes, the human plan must show an advisory warning
+containing both values. Machine-readable data must retain both exact values.
+Failure to obtain capacity information must be reported as unavailable capacity;
+it must not silently become zero or sufficient capacity.
+
+### R-CAP-002 — Capacity is advisory
+
+The source-byte comparison is an advisory conservative check, not a reservation,
+an output-size prediction, or a guarantee that the run fits or fails to fit.
+Relevant uncertainty includes compression expansion/reduction, evidence files,
+filesystem allocation, quotas/reservations, concurrent activity, metadata, and
+allocation timing. Low or unavailable capacity must not authorize source
+deletion, cancellation, a changed archive representation, or a hard execution
+gate unless a later owner decision explicitly adds such a contract.
+
+### R-CAP-003 — Per-stream execution recheck
+
+Before each selected stream/archive begins staging, destructive execution must
+observe destination free bytes again and compare them with remaining planned
+regular source bytes for that exact destination. Structured observations must
+identify at least destination, current free bytes, current-stream source bytes,
+and remaining planned source bytes when capacity is available.
+
+A successful or low-space precheck must not convert a later filesystem `ENOSPC`
+or other write failure into success. Ordinary execution/recovery behavior remains
+authoritative.
+
+### R-CAP-004 — Warning state transitions
+
+A low-capacity warning must not be emitted mechanically on every stream while the
+same condition remains materially unchanged. Emit at least the first transition
+into an insufficient state. A later warning may be emitted when the condition
+materially worsens or after it returned to sufficient capacity and became
+insufficient again. Unavailable-capacity warnings must likewise be state-based,
+not time-based.
+
+For `0.4.0a3`, material worsening means an increase in shortfall of at least the
+greater of 64 MiB and 5% of the shortfall at the last insufficient-capacity
+warning. This threshold controls operator noise only; it is not a storage-safety
+boundary. Reassess it after representative operational evidence shows excessive
+missed or duplicate warnings.
+
+### R-CAP-005 — Unexpected capacity-consumption diagnostic
+
+After a newly committed stream, when the platform exposes allocated block counts
+and both pre/post free-space observations are available, the implementation may
+compare observed free-space loss with measured allocation of the committed
+archive tree. A positive residual is material when it is at least the greater of
+64 MiB and 5% of measured archive allocation.
+
+A material residual must be described as **unexpected destination capacity
+consumption**. It must not be attributed to another process, filesystem behavior,
+or another cause without separate evidence. Concurrent activity, delayed
+allocation, filesystem metadata, journaling, quotas, snapshots, copy-on-write
+behavior, and measurement noise remain credible explanations. Failure to obtain
+the optional allocation measurement must remain advisory and must not fail an
+otherwise completed archive operation.
+
+### R-CAP-006 — Capacity units and exact values
+
+Human capacity messages must use the shared human-size formatter. Structured
+logs must retain exact integer byte values for available, remaining, written,
+and residual quantities. Capacity arithmetic must use exact integer bytes.
+Capacity observations and warnings must not weaken staged verification,
+committed verification, source revalidation, cleanup ordering, or synchronization
+requirements.
+
+## 24. 0.4.0a3 candidate decisions
+
+1. The exact candidate advances to `0.4.0a3`; target release core remains `0.4.0`.
+2. The candidate is one coherent runtime-accounting increment: invocation progress, destination-capacity observations/warnings, and shared human byte presentation.
+3. Decimal SI is the selected human-size convention for this candidate; IEC labels are not used with decimal divisors.
+4. Capacity warnings remain advisory. No preflight reservation or hard low-space gate is introduced.
+5. The 64 MiB / 5% dual thresholds are operator-noise heuristics with explicit review triggers, not safety guarantees.
+6. Invocation-local stream ordinal is runtime state only and does not become persistent archive identity.

@@ -62,6 +62,8 @@ def test_disjoint_sibling_roots_can_be_owned_concurrently(tmp_path: Path) -> Non
 def test_missing_lock_resource_is_visible_failure(tmp_path: Path) -> None:
     """Operational prerequisites fail visibly instead of becoming a skipped service run."""
 
-    with pytest.raises(LockUnavailableError, match="unavailable"):
-        with resource_locks((tmp_path / "missing",), exclusive=True):
-            pass
+    with (
+        pytest.raises(LockUnavailableError, match="unavailable"),
+        resource_locks((tmp_path / "missing",), exclusive=True),
+    ):
+        pass

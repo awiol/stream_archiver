@@ -34,10 +34,24 @@ def test_behavior_tests_explain_setup_and_contract() -> None:
     for path in sorted(tests_root.glob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
-                "test_"
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                and ast.get_docstring(node) is None
             ):
-                if ast.get_docstring(node) is None:
-                    missing.append(f"{path.name}:{node.name}")
+                missing.append(f"{path.name}:{node.name}")
 
     assert missing == []
+
+
+def test_canonical_schema_three_example_parses_with_explicit_discovery_controls() -> None:
+    """The user-facing example exercises the current configuration schema."""
+
+    from stream_archiver.config import StreamPartition, load_config
+
+    root = Path(__file__).parents[1]
+    config = load_config(root / "examples" / "config" / "policies.toml")
+
+    assert all(policy.recursive for policy in config.policies)
+    assert config.policies[0].stream_partition is StreamPartition.SOURCE_ROOT
+    assert config.policies[1].stream_partition is StreamPartition.PARENT_DIRECTORY

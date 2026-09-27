@@ -62,10 +62,6 @@ def sync_directories(paths: Iterable[Path]) -> None:
 def sync_tree_directories(root: Path) -> None:
     """Synchronize all real directories below ``root`` and then ``root`` itself."""
 
-    directories = [
-        path
-        for path in root.rglob("*")
-        if path.is_dir() and not path.is_symlink()
-    ]
+    directories = [path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()]
     directories.append(root)
     sync_directories(directories)
