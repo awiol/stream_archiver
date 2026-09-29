@@ -22,6 +22,14 @@ The timestamp-gap rule is a heuristic, not a producer-completion protocol. Schem
 
 ## Development and local verification
 
+The repository may track `local/.gitignore` to define exclusions for operator-owned
+files under `local/`. Keep its rules unchanged when applying this repository
+convention. The ignore file itself is the only tracked content allowed under
+`local/`; policy files, logs, JSON output, and all other local contents remain
+ignored and must not be staged or committed. Check the index explicitly before
+committing local configuration work (for example, `git status --short` and
+`git diff --cached --name-only`).
+
 For a locked `uv` development environment:
 
 ```bash

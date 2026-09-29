@@ -1,0 +1,5 @@
+# Local policies
+*.toml
+
+*.log
+*.json

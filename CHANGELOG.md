@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0a5 — 2026-09-29
+
+- Completed the 0.4.0a4 normalization by tracking the existing `local/.gitignore` unchanged and documenting that other `local/` contents remain excluded from commits.
+
 ## 0.4.0a4 — 2026-09-28
 
 - Normalized the delivered alpha source with Ruff and resolved remaining Ruff diagnostics, including binding run-progress callbacks to their current stream.
