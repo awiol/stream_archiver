@@ -32,10 +32,10 @@ stream-archiver --config ~/stream-archiver-policies.toml verify
 
 ## Policy example
 
-Configuration schema 3 makes discovery and stream partitioning explicit:
+Configuration schema 5 makes discovery, stream grouping, archive naming, and optional archive-unit subdivision explicit:
 
 ```toml
-schema_version = 3
+schema_version = 5
 run_interval = "30d"
 
 [[policies]]
@@ -50,14 +50,16 @@ stream_gap = "8h"
 symlink_rule = "drop-aliases-preserve-relative"
 recursive = true
 stream_partition = "source-root"
+archive_name_template = "{start:%Y-%b-%d_%H%M%S}--{end:%Y-%b-%d_%H%M%S}"
+archive_unit_max_source_bytes = 10000000000
+archive_unit_max_regular_files = 10000
 
 [[policies.compression_rules]]
 suffixes = [".json"]
 compression = "gzip"
 ```
 
-Schemas 1 and 2 remain readable and retain their historical discovery behavior:
-recursive traversal with source-root-wide stream grouping.
+Schemas 1 and 2 remain readable and retain their historical discovery behavior; schema 3 retains explicit recursion/grouping and the historical archive-name shape. Schema 4 opts into configurable human archive names. Schema 5 additionally enables optional archive-unit byte/file targets. Current names always retain the mandatory stable `--sa-<identity>` suffix.
 
 ### Recursion, grouping, and archive layout
 
@@ -73,6 +75,9 @@ These are separate concepts:
 - different configured source roots never form one stream or one archive plan;
 - archived payloads preserve their source-relative directory paths. Recursive
   discovery does not flatten output.
+- schema-5 `archive_unit_max_source_bytes` and `archive_unit_max_regular_files` may
+  subdivide one logical stream into several archive units after grouping; they do
+  not change which files belong to the logical stream.
 
 See [the user guide](docs/user-guide.md) for diagrams, examples, and configuration
 rationale.
@@ -138,6 +143,24 @@ stream-archiver plan --json
 
 `--at` is read-only. Destructive CLI and exported Python execution APIs do not
 accept an artificial eligibility clock.
+
+## Run result
+
+Immediate `run` prints a bounded human summary after successful archival work. It
+includes runtime, selected/completed stream counts, files and selected link
+dispositions, source and transformed payload bytes, signed payload savings, and
+transformation/extension disposition.
+
+```bash
+stream-archiver run
+stream-archiver run --json
+stream-archiver run --markdown
+stream-archiver run --report ./run-report.md
+```
+
+Use `run --json` for the complete machine result. `--report` creates a new Markdown
+auxiliary report and never overwrites an existing path. Scheduled `run-if-due` keeps
+its JSON-oriented result contract.
 
 ## Logs
 

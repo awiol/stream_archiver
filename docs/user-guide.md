@@ -82,6 +82,7 @@ independent.
 
 ```toml
 stream_partition = "source-root"
+archive_name_template = "{start:%Y-%b-%d_%H%M%S}--{end:%Y-%b-%d_%H%M%S}"
 ```
 
 This preserves historical behavior. All boundary entries under one source root
@@ -137,10 +138,10 @@ There is no flatten-output mode in the current 0.4 line.
 
 ## 6. Policy fields
 
-A schema-3 policy has this core shape:
+A schema-4 policy has this core shape:
 
 ```toml
-schema_version = 3
+schema_version = 4
 run_interval = "30d"
 
 [[policies]]
@@ -178,6 +179,42 @@ Controls traversal depth only. See sections 3 and 4.
 ### `stream_partition`
 
 Controls the grouping domain only. See section 4.
+
+### `archive_name_template`
+
+Schema 4 separates a descriptive human prefix from persistent archive-unit
+identity. The configured template renders only the prefix. Stream Archiver always
+appends `--sa-` plus a stable 20-hex identity suffix. Do not include that marker
+yourself.
+
+The available fields are `start`, `end`, and `span`. Start/end are UTC payload
+modification-time bounds. For example:
+
+```toml
+archive_name_template = "{start:%a-%d-%b-%Y_%H%M%S}--{end:%Y%m%d}--{span:%Dd%Hh%Mm%Ss}"
+```
+
+`%a` and `%b` use fixed English three-letter names. `%f` (microseconds) and `%N`
+(nanoseconds) are explicit opt-in sub-second fields. Omitting a format from
+`{start}` or `{end}` uses whole-second UTC text. The human prefix does not define
+identity, so reducing timestamp precision does not merge archives.
+
+Schemas 1–3 retain the historical archive-name algorithm. To change persistent
+naming, update the file to schema 4 deliberately and review `plan` before `run`.
+
+### `archive_unit_max_source_bytes` and `archive_unit_max_regular_files`
+
+Schema 5 can subdivide one already-selected logical stream into several archive
+units. `archive_unit_max_source_bytes` is a target based on original regular-file
+bytes; `archive_unit_max_regular_files` is a target based on regular-file count.
+Set either or both to positive integers. A single file is never split, so one file
+may exceed the byte target by itself.
+
+These controls are different from `stream_partition`: grouping determines which
+entries belong to one logical time stream, while archive-unit subdivision decides
+how that stream is represented by directory archive units. The byte target does
+not guarantee a future ZIP/container size. All units of a logical stream are
+committed and verified before source cleanup begins.
 
 ### `symlink_rule`
 
@@ -289,6 +326,32 @@ identify the cause.
 
 Human byte quantities use decimal SI units (`kB`, `MB`, `GB`, `TB`); JSON/log byte
 fields remain exact integers.
+
+After a successful immediate run, stdout now contains a bounded human result summary.
+It reports runtime, selected streams and completed archive units, regular files, selected
+link dispositions, source bytes, transformed written payload bytes, signed payload
+savings, payload-size ratio, transformation disposition, and the largest original-file
+extension groups. A compressed payload can be larger than its source; negative savings
+are reported rather than clamped.
+
+Use explicit output modes when another consumer needs a different representation:
+
+```bash
+stream-archiver run --json
+stream-archiver run --markdown
+stream-archiver run --report /path/to/run-report.md
+```
+
+`run --json` contains the complete extension × transformation matrix and exact integer
+byte values. `run --markdown` writes the complete human report to stdout. `--report`
+adds the same Markdown report as a new auxiliary file while keeping the selected stdout
+mode. Stream Archiver never overwrites an existing report path. If a report export fails
+after archives have already committed, the archive run remains successful and the
+export failure is logged as a warning.
+
+The report's `written_payload_bytes` excludes manifest/checksum/success files,
+filesystem block allocation, and any future container overhead. `run-if-due` keeps its
+machine-oriented JSON result because it is the scheduled automation surface.
 
 Verify archives owned by selected policies/source roots:
 
@@ -430,7 +493,7 @@ source tree's declared package version.
 
 ### Does Stream Archiver scan subdirectories?
 
-Yes for schema 1/2 and for schema 3 with `recursive = true`. Use
+Yes for schema 1/2 and for schema 3/4 with `recursive = true`. Use
 `recursive = false` for top-level-only discovery.
 
 ### Can one stream span multiple directories?

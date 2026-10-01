@@ -101,6 +101,16 @@ class ArchivePlan:
     archive_name: str
     stream: Stream
     actions: tuple[PlannedAction, ...]
+    archive_unit_index: int = 0
+    archive_unit_count: int = 1
+
+    @property
+    def archive_unit_id(self) -> str:
+        """Return the format-neutral deterministic identity for this archive unit."""
+
+        from stream_archiver.naming import archive_unit_id
+
+        return archive_unit_id(self.plan_id, unit_index=self.archive_unit_index)
 
     @property
     def payload_actions(self) -> tuple[PlannedAction, ...]:

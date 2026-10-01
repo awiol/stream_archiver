@@ -1,14 +1,14 @@
 # Stream Archiver Design
 
-**Document version:** `0.4.0-alpha.4`
-**Target package development version:** `0.4.0a3`
-**Date:** 2026-09-27
-**Status:** implementation design for the third 0.4 alpha candidate
-**Requirements baseline:** `docs/requirements.md`, document version `0.4.0-alpha.4`
+**Document version:** `0.5.0-alpha.2`
+**Target package development version:** `0.5.0a2`
+**Date:** 2026-09-29
+**Status:** implementation design for the second 0.5 alpha candidate
+**Requirements baseline:** `docs/requirements.md`, document version `0.5.0-alpha.2`
 
 ## 1. Design objective
 
-The 0.4 design repairs transaction and behavioral contracts while preserving the high-level architecture. The second alpha consolidated operator interfaces and mutation/API boundaries. The third alpha adds bounded run-level accounting and advisory destination-capacity observations without changing transaction safety.
+The 0.4 design repaired transaction and behavioral contracts while preserving the high-level architecture. The 0.5.0a1 design changes the persistent archive namespace by separating a format-neutral archive-unit identity from a configurable human archive name. It preserves the directory representation, transaction safety, reporting, and cleanup/recovery ordering.
 
 The design retains:
 
@@ -883,3 +883,334 @@ Capacity checks do not reserve blocks and do not stop a stream solely because th
 ### 21.9 Rejected alternatives
 
 This candidate does not add a timer/heartbeat, INFO rate limiter, periodic status thread, capacity reservation, hard low-space execution gate, output-size predictor, causal external-writer warning, generalized event bus, or persistent invocation ordinal. These mechanisms would either exceed the accepted `0.4.0a3` scope or require evidence and contracts not currently available.
+
+
+## 22. 0.4.0a4 final reporting design
+
+### 22.1 Boundary and non-goals
+
+The `0.4.0a4` change begins after successful archive execution evidence exists.
+It does not alter selection, staging, atomic archive commit, source revalidation,
+cleanup, completion evidence, capacity decisions, archive names, or due-state
+fingerprints.
+
+The design adds `reporting.py` as a presentation/accounting boundary. It is not
+a general analytics framework or plugin system.
+
+### 22.2 Grouped execution evidence
+
+`ArchiveExecutionResult` now carries immutable `RegularPayloadGroupResult`
+records grouped by case-folded original source suffix and archive action. Each
+group contains regular-file count, original source bytes, and finalized
+transformed payload bytes. This preserves the requested extension ×
+transformation evidence without retaining another per-file object after the
+archive plan already owns per-file source metadata. Report-state memory therefore
+scales with distinct suffix/action groups rather than selected file count.
+
+For current manifest format 2, finalized byte counts come directly from validated
+`archive_size` records created during staging. Legacy manifest format 1 predates
+that field; when a supported legacy archive is reconciled, the already verified
+final payload file supplies the size before it is folded into the group.
+Reporting therefore does not revisit deleted source files.
+
+### 22.3 Invocation aggregation
+
+`build_run_report()` consumes the completed `PolicyRunResult` values and an
+observed elapsed runtime. It aggregates only newly selected completed archive
+results. `recovered_archives` from the pre-planning recovery phase is retained in
+a separate collection.
+
+The result contains exact integer bytes and immutable transformation/extension
+breakdowns. Derived savings and ratio values are properties of those same exact
+integers. Zero source bytes yields no ratio/percentage. Negative savings is
+preserved when a codec expands input.
+
+The current directory representation has no single authoritative container-byte
+quantity. `archive_container_bytes` and `filesystem_allocation_bytes` therefore
+remain `None`; later representation/storage work can populate distinct fields
+without redefining transformed payload bytes.
+
+### 22.4 Extension and transformation model
+
+Reporting maps regular actions as follows:
+
+| Archive action | Report transformation |
+|---|---|
+| `move` | `uncompressed` |
+| legacy `copy` | `uncompressed` |
+| `gzip` | `gzip` |
+| `bz2` | `bzip2` |
+
+Original extension is `Path(source_path).suffix.casefold()`. Empty suffixes use
+`<none>`. The result stores a complete extension × transformation matrix.
+Console rendering ranks extensions by source bytes, then file count and label,
+and displays a bounded prefix plus one aggregate `other` row. JSON and Markdown
+do not discard the omitted console groups.
+
+### 22.5 CLI rendering contract
+
+Immediate execution now mirrors planning's operator split:
+
+```text
+stream-archiver run             # bounded human summary
+stream-archiver run --json      # complete machine result
+stream-archiver run --markdown  # complete Markdown to stdout
+```
+
+The renderers consume the same `RunReport`. Operational logs remain on stderr.
+The modes do not mix human prose into JSON stdout.
+
+`run-if-due` remains JSON because it is the scheduled state-management surface
+and its per-policy completion callback persists due-state immediately. Replacing
+that surface with a human report is outside this candidate.
+
+### 22.6 Optional Markdown export
+
+`run --report PATH` is checked before destructive execution. An existing final
+pathname is a configuration failure before mutation. The parent must already
+exist and be a directory.
+
+After successful archival execution, the complete Markdown text is written to a
+temporary regular file in the target directory and `fsync`ed. `os.link()` then
+publishes the requested pathname only if it is still unused. The temporary name
+is removed after publication when cleanup succeeds. A temporary-name cleanup
+failure after successful publication emits a separate warning and does not
+misreport the already published final report as an export failure. This prevents
+a race from overwriting a file created after preflight while preserving the
+actual partial-success state.
+
+The report file is auxiliary. If post-commit publication fails, the CLI emits
+`run_report_export_failed` at WARNING with preserved-state/remediation fields and
+continues to return archival success. This prevents an auxiliary presentation
+failure from causing callers to treat committed archive transactions as though
+they must be repeated. The operator can re-render from retained machine evidence
+only when such evidence was separately captured; automatic historical report
+regeneration is not claimed by this candidate.
+
+### 22.7 Human report structure
+
+The bounded console form reports runtime, policies, selected streams, completed
+archive units, prior recoveries, regular files, link dispositions, source bytes,
+written payload bytes, signed payload savings, payload-size ratio,
+transformation disposition, and the highest-volume extension groups.
+
+The Markdown form is intentionally more complete. It contains exact byte values,
+all extension/transformation rows, archive output paths, recovered prior archive
+paths, and an explicit metric-boundary note.
+
+### 22.8 Compatibility decision
+
+Changing immediate `run` from implicit JSON to human output is an intentional
+pre-1.0 CLI incompatibility authorized by the operator request. The migration is
+explicit `run --json`. No compatibility claim is made for consumers that parse
+the old implicit JSON without adopting the flag.
+
+The result schema starts at `schema_version = 1`. Future additive fields must
+preserve the existing metric meanings; a semantic redefinition requires a schema
+and compatibility decision.
+
+### 22.9 Deferred work remains separate
+
+This reporting boundary deliberately does not introduce archive-unit
+subdivision, ZIP representation, configurable persistent archive naming, a
+storage-backend protocol, durable stream sequence allocation, automatic report
+history, or report-as-archive-provenance behavior. Those changes have different
+persistent-state, extension-contract, or recovery boundaries.
+
+
+## 23. 0.5.0a1 archive-unit identity and configurable naming design
+
+### 23.1 Reconciled implementation baseline
+
+The user-supplied `0.4.0a5` sdist did not contain the issued `0.4.0a4` reporting
+module or repository documentation. The implementation baseline for this change
+is therefore a three-way reconciliation: issued `0.4.0a3` is the common source,
+issued `0.4.0a4` supplies the accepted reporting delta, and the source files
+present in the user `0.4.0a5` sdist supply the user-side changes. The reconciled
+state passed the complete 117-test source suite before 0.5 implementation.
+
+The sdist does not preserve repository-only `local/` or ignore configuration, so
+no claim is made about the exact repository-level `local/` implementation beyond
+not treating its absence from the sdist as a deletion instruction.
+
+### 23.2 Identity model
+
+`plan_id` remains the deterministic logical archive-plan digest over policy,
+source/destination roots, selected entries, actions, identities, and selection
+bounds. `ArchivePlan.archive_unit_index` is introduced with current value zero.
+
+The full archive-unit identity is:
+
+```text
+SHA256(canonical JSON {
+  domain: "stream-archiver/archive-unit/v1",
+  plan_id: <64-hex plan id>,
+  unit_index: <non-negative integer>
+})
+```
+
+This keeps identity independent of archive representation and human name while
+reserving a deterministic dimension for `0.5.0a2` subdivision. The future
+subdivision design must decide unit ordering and action allocation before indexes
+above zero become valid. Invocation progress indexes are unrelated.
+
+### 23.3 Persistent archive name
+
+For schema 4 the final directory name is:
+
+```text
+<rendered-human-prefix>--sa-<first-20-hex-of-archive-unit-id>
+```
+
+Twenty hexadecimal characters provide an 80-bit truncated namespace. The full
+identity remains available through `ArchivePlan.archive_unit_id` and JSON plan
+output. A truncated collision is not silently resolved: an occupied final path
+whose manifest does not match the current plan follows the existing hard
+collision/error path.
+
+Schemas 1–3 and programmatic `Policy(..., archive_name_template=None)` retain the
+historical microsecond-boundary plus `plan_id[:10]` name. This prevents a config
+file from changing persistent namespace merely because the package is upgraded.
+
+### 23.4 Controlled template formatter
+
+`naming.py` owns the current controlled grammar. `string.Formatter` is used only
+to parse replacement fields; Python `datetime.strftime()` is not used for human
+month/weekday names because its `%a`/`%b` output depends on locale.
+
+Allowed replacement fields are `start`, `end`, and `span`. Start/end directives:
+
+- `%Y`, `%m`, `%d`, `%H`, `%M`, `%S` — zero-padded numeric UTC components;
+- `%b`, `%a` — fixed English three-letter month/weekday tokens;
+- `%f` — six-digit microseconds;
+- `%N` — nine-digit nanoseconds; and
+- `%%` — literal percent.
+
+An omitted start/end format uses `%Y%m%dT%H%M%SZ`, so sub-second text is opt-in.
+Span directives are `%D`, `%H`, `%M`, `%S`, `%f`, `%N`, and `%%`; omitted span
+format uses `%Dd%Hh%Mm%Ss`. Omitted precision affects only the human prefix.
+
+### 23.5 Configuration-schema boundary
+
+Schema 4 adds `archive_name_template`. Its default is the current whole-second
+start/end template. Older schemas reject the key and leave the Policy field as
+`None`. This explicit schema boundary is preferable to silently changing names
+for all existing configurations.
+
+The policy scheduling fingerprint includes the effective template because a
+change creates a different persistent destination namespace even though stream
+selection is unchanged.
+
+### 23.6 Filename safety and filesystem limits
+
+Configuration validation rejects path separators, NUL, the reserved `--sa-`
+marker, unknown fields/directives, conversions, and nested replacement fields.
+Planning validates the rendered prefix and the complete encoded filename length.
+`os.pathconf(destination, "PC_NAME_MAX")` is used when available; 255 bytes is
+the local-Linux fallback if the limit cannot be queried. The actual filesystem
+operation remains authoritative if the environment differs.
+
+### 23.7 Historical discovery and verification
+
+The existing strict legacy archive-name regular expression remains. Destination
+verification additionally recognizes any real directory whose basename ends in
+a syntactically valid current `--sa-<20 hex>` suffix. This permits arbitrary
+human templates while retaining malformed-archive detection.
+
+For current-format names, manifest validation recomputes the expected suffix from
+`plan_id` and unit index zero. Renaming a current archive while changing only the
+manifest's `archive_name` therefore cannot detach visible identity from the
+original plan. Historical names do not receive this new suffix check.
+
+### 23.8 Deferred boundaries
+
+No new storage protocol is introduced. The archive unit is still represented by
+a local directory and uses the same staging, atomic commit, fsync, verification,
+source-revalidation, cleanup, and recovery mechanisms. `0.5.0a2` can build
+subdivision on `archive_unit_index`; ZIP remains a later representation; durable
+human sequence allocation and non-filesystem destination backends remain
+separate decisions.
+
+
+## 24. 0.5.0a2 archive-unit subdivision design
+
+### 24.1 Separation of concepts
+
+`stream_partition` continues to choose the discovery/grouping domain before time
+segmentation. The schema-5 archive-unit limits operate only after one logical
+stream and its complete action set have been selected. The design therefore uses:
+
+```text
+source root -> grouping domain -> logical time stream -> archive units -> directory representation
+```
+
+This prevents the persistent grouping policy from being overloaded with a size
+control and leaves archive representation independent for future ZIP work.
+
+### 24.2 Deterministic partition algorithm
+
+Planning first resolves the complete logical-stream action set and archive-path
+collisions. It computes one logical `plan_id`. When subdivision is configured,
+the plan-id input also records the effective maximum source bytes and maximum
+regular files. This makes a partition-policy change an identity change while
+leaving unpartitioned 0.5.0a1 identities unchanged.
+
+Regular payload actions are sorted by `(mtime_ns, relative_path)`. A greedy pass
+starts a new unit before adding the next regular file if the byte target would be
+exceeded or if the current unit has already reached the file-count target. One
+oversized file remains indivisible and occupies its own unit.
+
+Cleanup-only aliases follow the unit that owns their selected regular target.
+Other symlink actions are placed deterministically relative to regular-action
+ordering and do not consume byte/file limits.
+
+Every resulting `ArchivePlan` carries the common logical `plan_id`, its
+zero-based `archive_unit_index`, and common `archive_unit_count`. The existing
+domain-separated archive-unit identity hashes `plan_id` plus the unit index.
+
+### 24.3 Group transaction boundary
+
+A logical stream is now a group transaction for cleanup. Service execution
+commits each archive unit with `defer_cleanup=True`. Every committed unit is
+fully staged, atomically published, and verified, but its sources remain. After
+all units exist, `complete_committed_plans()` validates group cardinality and
+identity, verifies every pending unit, and revalidates all source entries before
+performing any cleanup.
+
+This ordering addresses the crash case in which unit zero commits but a later
+unit fails. Source state remains sufficient to deterministically reconstruct the
+original complete logical plan and therefore the same unit identities on retry.
+It deliberately trades temporary duplicate storage for deterministic recovery
+and source safety.
+
+### 24.4 Manifest and recovery
+
+Manifest format 3 adds `archive_unit_id`, `archive_unit_index`, and
+`archive_unit_count`. Plan/manifest reconciliation checks all three fields in
+addition to plan, source, destination, and archive name. Manifest validation also
+recomputes the unit identity from plan id and index.
+
+Recovery groups pending format-3 archives by `plan_id`. It does not delete
+sources for an incomplete declared group. After planning, orchestration compares
+any deferred incomplete group identities with the freshly reconstructed logical
+plans. A mismatch (for example because partition policy or source membership
+changed) stops execution before new archival mutation; silently abandoning the
+old pending group is not permitted. A complete pending group is verified before
+cleanup proceeds. Formats 1 and 2 retain their historical single-archive recovery
+semantics.
+
+### 24.5 Progress and reporting
+
+Invocation totals deduplicate logical streams by source root plus logical
+`plan_id`. Unit staging can reset unit-local byte reconciliation without
+advancing the stream ordinal. Final reporting therefore exposes one selected
+logical stream and multiple completed archive units when subdivision occurs.
+
+### 24.6 Scope boundary
+
+The unit byte limit is measured from original regular source sizes and is only a
+planning target. It does not predict compressed payload size, block allocation,
+or future ZIP overhead. `0.5.0a2` keeps the directory representation and local
+filesystem durability model. ZIP and any representation-specific hard maximum
+container size remain future design work; a destination storage protocol remains
+deferred until a concrete second backend justifies an extension contract.

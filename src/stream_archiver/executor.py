@@ -32,6 +32,11 @@ from stream_archiver.model import (
     EntryKind,
     PlannedAction,
 )
+from stream_archiver.naming import (
+    archive_unit_id,
+    current_archive_name_matches_plan,
+    is_current_archive_name,
+)
 from stream_archiver.observability import log_event
 from stream_archiver.progress import ExecutionProgressDelta, ProgressSink
 
@@ -41,9 +46,21 @@ COMPRESSION_LEVEL = 9
 MANIFEST_NAME = "MANIFEST.json"
 CHECKSUMS_NAME = "SHA256SUMS.json"
 SUCCESS_NAME = "SUCCESS.json"
-MANIFEST_FORMAT_VERSION = 2
+MANIFEST_FORMAT_VERSION = 3
+PREVIOUS_MANIFEST_FORMAT_VERSION = 2
 LEGACY_MANIFEST_FORMAT_VERSION = 1
 EVIDENCE_FORMAT_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RegularPayloadGroupResult:
+    """Exact regular-payload totals grouped by source suffix and archive action."""
+
+    source_suffix: str
+    action: ActionKind
+    files: int
+    source_bytes: int
+    written_payload_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +74,7 @@ class ArchiveExecutionResult:
     preserved_symlinks: int
     dropped_alias_symlinks: int
     skipped_symlinks: int
+    regular_payload_groups: tuple[RegularPayloadGroupResult, ...]
     success_evidence: Path | None
 
     @property
@@ -163,6 +181,7 @@ def execute_plan(
     *,
     event_clock: Callable[[], datetime] | None = None,
     progress_sink: ProgressSink | None = None,
+    defer_cleanup: bool = False,
 ) -> ArchiveExecutionResult:
     """Execute one staged move transaction for a source stream.
 
@@ -195,8 +214,11 @@ def execute_plan(
             manifest = _read_manifest(final_directory / MANIFEST_NAME, RecoveryError)
             _validate_plan_manifest_match(plan, manifest, final_directory)
             if manifest.get("cleanup_complete") is not True:
-                _recover_manifest(final_directory, manifest, event_clock=clock)
-            elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+                if defer_cleanup:
+                    _verify_committed_pending_archive(final_directory, manifest)
+                else:
+                    _recover_manifest(final_directory, manifest, event_clock=clock)
+            elif _uses_integrity_evidence(manifest["manifest_format_version"]):
                 _ensure_success_evidence(final_directory, manifest)
             result = _result_from_manifest(final_directory, manifest)
             log_event(
@@ -252,7 +274,11 @@ def execute_plan(
             phase="committed_verification",
             archive_directory=final_directory,
             plan_id=plan.plan_id,
+            archive_unit_index=plan.archive_unit_index,
+            archive_unit_count=plan.archive_unit_count,
         )
+        if defer_cleanup:
+            return _result_from_manifest(final_directory, manifest)
 
         log_event(
             LOGGER,
@@ -317,6 +343,97 @@ def execute_plan(
         raise ExecutionError(f"filesystem operation failed for plan {plan.plan_id}: {exc}") from exc
 
 
+def complete_committed_plans(
+    plans: tuple[ArchivePlan, ...],
+    *,
+    event_clock: Callable[[], datetime] | None = None,
+) -> tuple[ArchiveExecutionResult, ...]:
+    """Complete source cleanup only after every unit in one logical stream exists.
+
+    The first pass verifies each pending committed unit and strictly revalidates
+    every still-selected source before any source is removed. The second pass
+    performs cleanup and final evidence. This prevents a later unit's source
+    mismatch from being discovered only after an earlier unit has already
+    deleted its source entries.
+    """
+
+    if not plans:
+        return ()
+    expected_plan_id = plans[0].plan_id
+    expected_count = len(plans)
+    expected_indices = set(range(expected_count))
+    if {plan.plan_id for plan in plans} != {expected_plan_id}:
+        raise ExecutionError("archive-unit group contains more than one logical plan_id")
+    if {plan.archive_unit_index for plan in plans} != expected_indices:
+        raise ExecutionError("archive-unit group indexes are not a complete deterministic range")
+    if any(plan.archive_unit_count != expected_count for plan in plans):
+        raise ExecutionError("archive-unit group count does not match planned units")
+
+    clock = event_clock or _observed_utc_now
+    manifests: dict[int, dict[str, Any]] = {}
+    pending: list[ArchivePlan] = []
+    for plan in plans:
+        directory = plan.final_directory
+        if directory.is_symlink() or not directory.is_dir():
+            raise RecoveryError(f"committed archive unit is not a real directory: {directory}")
+        manifest = _read_manifest(directory / MANIFEST_NAME, RecoveryError)
+        _validate_plan_manifest_match(plan, manifest, directory)
+        manifests[plan.archive_unit_index] = manifest
+        if manifest.get("cleanup_complete") is True:
+            if _uses_integrity_evidence(manifest["manifest_format_version"]):
+                _ensure_success_evidence(directory, manifest)
+            continue
+        _verify_committed_pending_archive(directory, manifest)
+        _validate_all_sources(manifest, plan.source_root)
+        pending.append(plan)
+
+    for plan in pending:
+        directory = plan.final_directory
+        manifest = manifests[plan.archive_unit_index]
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "source_cleanup_started",
+            "revalidating and removing committed archive-unit sources",
+            archive=directory,
+            source=plan.source_root,
+            plan_id=plan.plan_id,
+            archive_unit_index=plan.archive_unit_index,
+            archive_unit_count=plan.archive_unit_count,
+        )
+        try:
+            cleanup_directories = _remove_sources(manifest, plan.source_root)
+            sync_directories(cleanup_directories)
+            manifest["cleanup_complete"] = True
+            if _uses_integrity_evidence(manifest["manifest_format_version"]):
+                manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(clock()))
+            _write_manifest(directory / MANIFEST_NAME, manifest)
+            if _uses_integrity_evidence(manifest["manifest_format_version"]):
+                _ensure_success_evidence(directory, manifest)
+        except OSError as exc:
+            raise ExecutionError(
+                f"filesystem operation failed during cleanup for plan {plan.plan_id}: {exc}"
+            ) from exc
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "archive_execution_completed",
+            "archive-unit transaction completed with verified success evidence",
+            archive=directory,
+            plan_id=plan.plan_id,
+            archive_unit_index=plan.archive_unit_index,
+            archive_unit_count=plan.archive_unit_count,
+            transaction_percent=100,
+            phase="completed",
+            outcome="success",
+        )
+
+    return tuple(
+        _result_from_manifest(plan.final_directory, manifests[plan.archive_unit_index])
+        for plan in plans
+    )
+
+
 def _discard_staging_directory(path: Path, *, archive: str) -> None:
     """Best-effort removal of an uncommitted staging directory with diagnostics."""
 
@@ -371,6 +488,7 @@ def recover_pending_archives(
         if destination_root.is_symlink() or not destination_root.is_dir():
             raise RecoveryError(f"archive destination is not a real directory: {destination_root}")
         recovered: list[Path] = []
+        records: list[tuple[Path, dict[str, Any]]] = []
         for child in sorted(destination_root.iterdir()):
             if child.is_symlink() or not child.is_dir():
                 continue
@@ -386,6 +504,17 @@ def recover_pending_archives(
                 raise RecoveryError(f"archive manifest destination mismatch: {child}")
             if manifest.get("archive_name") != child.name:
                 raise RecoveryError(f"archive manifest name mismatch: {child}")
+            records.append((child, manifest))
+
+        grouped: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+        legacy_records: list[tuple[Path, dict[str, Any]]] = []
+        for child, manifest in records:
+            if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+                grouped.setdefault(manifest["plan_id"], []).append((child, manifest))
+            else:
+                legacy_records.append((child, manifest))
+
+        for child, manifest in legacy_records:
             if manifest.get("cleanup_complete") is not True:
                 log_event(
                     LOGGER,
@@ -397,8 +526,59 @@ def recover_pending_archives(
                 )
                 _recover_manifest(child, manifest, event_clock=clock)
                 recovered.append(child)
-            elif manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+            elif _uses_integrity_evidence(manifest["manifest_format_version"]):
                 _ensure_success_evidence(child, manifest)
+
+        for plan_id, group in sorted(grouped.items()):
+            counts = {manifest["archive_unit_count"] for _child, manifest in group}
+            if len(counts) != 1:
+                raise RecoveryError(f"archive-unit count mismatch for plan {plan_id}")
+            unit_count = counts.pop()
+            indices = [manifest["archive_unit_index"] for _child, manifest in group]
+            if len(indices) != len(set(indices)):
+                raise RecoveryError(f"duplicate archive-unit index for plan {plan_id}")
+            pending = [
+                (child, manifest)
+                for child, manifest in group
+                if manifest.get("cleanup_complete") is not True
+            ]
+            if len(group) != unit_count or set(indices) != set(range(unit_count)):
+                if pending:
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "pending_archive_unit_group_incomplete",
+                        "pending archive-unit cleanup is deferred until every planned unit is committed",
+                        source=source_root,
+                        destination=destination_root,
+                        plan_id=plan_id,
+                        committed_units=len(group),
+                        expected_units=unit_count,
+                        preserved_state="pending unit sources remain in place",
+                        next_action="rerun Stream Archiver so missing archive units can be committed",
+                        retry_safe=True,
+                    )
+                continue
+
+            for child, manifest in group:
+                if manifest.get("cleanup_complete") is True:
+                    _ensure_success_evidence(child, manifest)
+                else:
+                    _verify_committed_pending_archive(child, manifest)
+            for child, manifest in sorted(pending, key=lambda item: item[1]["archive_unit_index"]):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "pending_cleanup_found",
+                    "complete archive-unit group requires source cleanup recovery",
+                    archive=child,
+                    source=source_root,
+                    plan_id=plan_id,
+                    archive_unit_index=manifest["archive_unit_index"],
+                    archive_unit_count=unit_count,
+                )
+                _recover_manifest(child, manifest, event_clock=clock)
+                recovered.append(child)
         log_event(
             LOGGER,
             logging.INFO if recovered else logging.DEBUG,
@@ -417,6 +597,57 @@ def recover_pending_archives(
         ) from exc
 
 
+def deferred_archive_unit_plan_ids(
+    destination_root: Path,
+    source_root: Path,
+) -> frozenset[str]:
+    """Return incomplete pending format-3 logical plan identities for one source.
+
+    The caller can compare these identities with a fresh plan before allowing new
+    archival mutation. This prevents a configuration or source-set change from
+    abandoning a partially committed archive-unit group and cleaning its sources
+    under a different logical identity.
+    """
+
+    if not destination_root.exists():
+        return frozenset()
+    if destination_root.is_symlink() or not destination_root.is_dir():
+        raise RecoveryError(f"archive destination is not a real directory: {destination_root}")
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for child in sorted(destination_root.iterdir()):
+        if child.is_symlink() or not child.is_dir() or child.name == ".stream-archiver-staging":
+            continue
+        manifest_path = child / MANIFEST_NAME
+        if not manifest_path.is_file():
+            continue
+        manifest = _read_manifest(manifest_path, RecoveryError)
+        if manifest.get("source_root") != str(source_root):
+            continue
+        if manifest.get("destination_root") != str(destination_root):
+            raise RecoveryError(f"archive manifest destination mismatch: {child}")
+        if manifest.get("archive_name") != child.name:
+            raise RecoveryError(f"archive manifest name mismatch: {child}")
+        if manifest["manifest_format_version"] != MANIFEST_FORMAT_VERSION:
+            continue
+        grouped.setdefault(manifest["plan_id"], []).append(manifest)
+
+    deferred: set[str] = set()
+    for plan_id, group in grouped.items():
+        counts = {manifest["archive_unit_count"] for manifest in group}
+        if len(counts) != 1:
+            raise RecoveryError(f"archive-unit count mismatch for plan {plan_id}")
+        unit_count = counts.pop()
+        indices = [manifest["archive_unit_index"] for manifest in group]
+        if len(indices) != len(set(indices)):
+            raise RecoveryError(f"duplicate archive-unit index for plan {plan_id}")
+        incomplete = len(group) != unit_count or set(indices) != set(range(unit_count))
+        pending = any(manifest.get("cleanup_complete") is not True for manifest in group)
+        if incomplete and pending:
+            deferred.add(plan_id)
+    return frozenset(deferred)
+
+
 def verify_archive(directory: Path) -> ArchiveVerificationResult:
     """Verify one archive under the destination shared cooperative lock."""
 
@@ -427,8 +658,9 @@ def verify_archive(directory: Path) -> ArchiveVerificationResult:
 def _verify_archive_unlocked(directory: Path) -> ArchiveVerificationResult:
     """Recompute archive hashes and validate completion evidence.
 
-    Version-2 archives require a completed manifest, a matching SHA-256 index,
-    and a ``SUCCESS.json`` marker whose manifest hash matches the final manifest.
+    Version-2 and version-3 archives require a completed manifest, a matching
+    SHA-256 index, and a ``SUCCESS.json`` marker whose manifest hash matches the
+    final manifest.
     Legacy version-1 archives can still be payload-verified but have no separate
     success marker.
     """
@@ -456,7 +688,7 @@ def _verify_archive_unlocked(directory: Path) -> ArchiveVerificationResult:
 
     checksums_digest: str | None = None
     success_path: Path | None = None
-    if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+    if _uses_integrity_evidence(manifest["manifest_format_version"]):
         checksums_digest = _verify_checksums_file(directory, manifest)
         success_path = directory / SUCCESS_NAME
         success = _read_json(success_path, RecoveryError, "success evidence")
@@ -507,6 +739,13 @@ def _validate_plan_manifest_match(
         raise ExecutionError(f"archive manifest destination mismatch: {final_directory}")
     if manifest.get("archive_name") != plan.archive_name:
         raise ExecutionError(f"archive manifest name mismatch: {final_directory}")
+    if manifest.get("manifest_format_version") == MANIFEST_FORMAT_VERSION:
+        if manifest.get("archive_unit_id") != plan.archive_unit_id:
+            raise ExecutionError(f"archive manifest unit identity mismatch: {final_directory}")
+        if manifest.get("archive_unit_index") != plan.archive_unit_index:
+            raise ExecutionError(f"archive manifest unit index mismatch: {final_directory}")
+        if manifest.get("archive_unit_count") != plan.archive_unit_count:
+            raise ExecutionError(f"archive manifest unit count mismatch: {final_directory}")
 
 
 def _ensure_real_directory(path: Path) -> None:
@@ -591,6 +830,9 @@ def _stage_plan(
     return {
         "manifest_format_version": MANIFEST_FORMAT_VERSION,
         "plan_id": plan.plan_id,
+        "archive_unit_id": plan.archive_unit_id,
+        "archive_unit_index": plan.archive_unit_index,
+        "archive_unit_count": plan.archive_unit_count,
         "policy_name": plan.policy_name,
         "source_root": str(plan.source_root),
         "destination_root": str(plan.destination_root),
@@ -866,10 +1108,10 @@ def _recover_manifest(
     )
     sync_directories(cleanup_directories)
     manifest["cleanup_complete"] = True
-    if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+    if _uses_integrity_evidence(manifest["manifest_format_version"]):
         manifest["cleanup_completed_at"] = _format_utc(_require_aware_utc(event_clock()))
     _write_manifest(directory / MANIFEST_NAME, manifest)
-    if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+    if _uses_integrity_evidence(manifest["manifest_format_version"]):
         _ensure_success_evidence(directory, manifest)
 
 
@@ -891,7 +1133,7 @@ def _verify_committed_pending_archive(
     if on_disk != manifest:
         raise RecoveryError(f"committed archive manifest changed unexpectedly: {directory}")
     _verify_archive_payloads(directory, manifest)
-    if manifest["manifest_format_version"] == MANIFEST_FORMAT_VERSION:
+    if _uses_integrity_evidence(manifest["manifest_format_version"]):
         _verify_checksums_file(directory, manifest)
 
 
@@ -1176,7 +1418,11 @@ def _validate_manifest(
     if not isinstance(manifest, dict):
         raise error_type(f"archive manifest must be an object: {path}")
     version = manifest.get("manifest_format_version")
-    if version not in {LEGACY_MANIFEST_FORMAT_VERSION, MANIFEST_FORMAT_VERSION}:
+    if version not in {
+        LEGACY_MANIFEST_FORMAT_VERSION,
+        PREVIOUS_MANIFEST_FORMAT_VERSION,
+        MANIFEST_FORMAT_VERSION,
+    }:
         raise error_type(f"unsupported manifest version in {path}")
 
     required_strings = (
@@ -1190,6 +1436,14 @@ def _validate_manifest(
     for key in required_strings:
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             raise error_type(f"invalid {key} in archive manifest {path}")
+    archive_name = manifest["archive_name"]
+    unit_index = manifest.get("archive_unit_index", 0) if version == MANIFEST_FORMAT_VERSION else 0
+    if is_current_archive_name(archive_name) and not current_archive_name_matches_plan(
+        archive_name, manifest["plan_id"], unit_index=unit_index
+    ):
+        raise error_type(
+            f"archive identity suffix does not match plan_id in archive manifest {path}"
+        )
     if not Path(manifest["source_root"]).is_absolute():
         raise error_type(f"source_root must be absolute in archive manifest {path}")
     if not Path(manifest["destination_root"]).is_absolute():
@@ -1207,6 +1461,27 @@ def _validate_manifest(
         if manifest.get("gzip_compresslevel") != COMPRESSION_LEVEL:
             raise error_type(f"invalid gzip_compresslevel in archive manifest {path}")
         return
+
+    if version == MANIFEST_FORMAT_VERSION:
+        if not _is_sha256(manifest.get("archive_unit_id")):
+            raise error_type(f"invalid archive_unit_id in archive manifest {path}")
+        unit_index = manifest.get("archive_unit_index")
+        unit_count = manifest.get("archive_unit_count")
+        if (
+            isinstance(unit_index, bool)
+            or not isinstance(unit_index, int)
+            or unit_index < 0
+            or isinstance(unit_count, bool)
+            or not isinstance(unit_count, int)
+            or unit_count < 1
+            or unit_index >= unit_count
+        ):
+            raise error_type(f"invalid archive-unit cardinality in archive manifest {path}")
+        expected_id = archive_unit_id(manifest["plan_id"], unit_index=unit_index)
+        if manifest["archive_unit_id"] != expected_id:
+            raise error_type(
+                f"archive_unit_id does not match plan_id/index in archive manifest {path}"
+            )
 
     if manifest.get("compression_level") != COMPRESSION_LEVEL:
         raise error_type(f"invalid compression_level in archive manifest {path}")
@@ -1286,7 +1561,7 @@ def _validate_manifest_record(
     if source_kind is EntryKind.REGULAR:
         if not _is_sha256(source_digest) or not _is_sha256(archive_digest):
             raise error_type(f"{context} has invalid regular-file digests")
-        if version == MANIFEST_FORMAT_VERSION:
+        if _uses_integrity_evidence(version):
             if not isinstance(record.get("archive_size"), int) or record["archive_size"] < 0:
                 raise error_type(f"{context} has invalid archive_size")
             expected_compression = _compression_for_action(action)
@@ -1302,6 +1577,12 @@ def _compression_for_action(action: ActionKind) -> str | None:
     if action is ActionKind.BZ2:
         return "bz2"
     return None
+
+
+def _uses_integrity_evidence(version: int) -> bool:
+    """Return whether a manifest version has checksums and success evidence."""
+
+    return version in {PREVIOUS_MANIFEST_FORMAT_VERSION, MANIFEST_FORMAT_VERSION}
 
 
 def _is_sha256(value: Any) -> bool:
@@ -1325,8 +1606,36 @@ def _safe_manifest_relative_path(
 
 def _result_from_manifest(directory: Path, manifest: dict[str, Any]) -> ArchiveExecutionResult:
     counts = {kind: 0 for kind in ActionKind}
+    payload_groups: dict[tuple[str, ActionKind], list[int]] = {}
     for record in manifest["entries"]:
-        counts[ActionKind(record["action"])] += 1
+        action = ActionKind(record["action"])
+        counts[action] += 1
+        if EntryKind(record["source_kind"]) is EntryKind.REGULAR:
+            archive_path = Path(record["archive_path"])
+            archive_size = record.get("archive_size")
+            if not isinstance(archive_size, int):
+                # Version-1 manifests predate archive_size. The already-verified
+                # committed payload is the authoritative size for that legacy case.
+                archive_size = (directory / archive_path).stat().st_size
+            source_path = Path(record["source_path"])
+            key = (source_path.suffix.casefold(), action)
+            group = payload_groups.setdefault(key, [0, 0, 0])
+            group[0] += 1
+            group[1] += record["identity"]["size"]
+            group[2] += archive_size
+    regular_payload_groups = tuple(
+        RegularPayloadGroupResult(
+            source_suffix=source_suffix,
+            action=action,
+            files=values[0],
+            source_bytes=values[1],
+            written_payload_bytes=values[2],
+        )
+        for (source_suffix, action), values in sorted(
+            payload_groups.items(),
+            key=lambda item: (item[0][0], item[0][1].value),
+        )
+    )
     success = directory / SUCCESS_NAME
     return ArchiveExecutionResult(
         archive_directory=directory,
@@ -1341,6 +1650,7 @@ def _result_from_manifest(directory: Path, manifest: dict[str, Any]) -> ArchiveE
         preserved_symlinks=counts[ActionKind.PRESERVE_SYMLINK],
         dropped_alias_symlinks=counts[ActionKind.DROP_ALIAS_SYMLINK],
         skipped_symlinks=counts[ActionKind.SKIP_SYMLINK],
+        regular_payload_groups=regular_payload_groups,
         success_evidence=(success if success.is_file() and not success.is_symlink() else None),
     )
 

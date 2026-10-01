@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0a3 — 2026-10-01
+
+- Applied behavior-preserving Ruff lint normalization to report text and restored the Python systemd verifier to non-executable mode.
+
+## 0.5.0a2 — 2026-09-29
+
+- Added configuration schema 5 with optional deterministic archive-unit source-byte and regular-file-count targets.
+- Subdivided one logical stream greedily in stable modification-time/path order without splitting individual files; oversized single files remain intact.
+- Bound subdivision policy into logical plan identity so different unit boundaries cannot reuse the same persistent unit identity, while unsplit 0.5.0a1 identity remains stable.
+- Added manifest format 3 with archive-unit identity, index, and group count, plus explicit plan/manifest reconciliation.
+- Changed subdivided-stream execution to commit and verify every unit before any source cleanup begins.
+- Added group-aware pending recovery so an incomplete committed unit set cannot authorize cleanup.
+- Kept logical-stream progress/report counts separate from archive-unit counts.
+- Kept directory representation and local-filesystem durability semantics; ZIP and hard final-container-size semantics remain future work.
+
+## 0.5.0a1 — 2026-09-29
+
+- Added a format-neutral archive-unit identity, domain-separated from `plan_id` and parameterized by a deterministic unit index reserved for later stream subdivision.
+- Added configuration schema 4 with per-policy `archive_name_template`; schemas 1–3 continue to use the historical persistent archive-name shape.
+- Added mandatory `--sa-<20 hex>` stable identity suffixes for schema-4 archive names, keeping human naming separate from persistent identity.
+- Added a controlled locale-independent formatter for UTC start/end and span fields, including fixed English month/weekday tokens and explicit microsecond/nanosecond opt-in.
+- Added filename-safety and destination `PC_NAME_MAX` checks for rendered names.
+- Added full archive-unit identity/index to machine planning output and included naming policy in scheduled-policy fingerprints.
+- Extended destination audit and manifest validation to recognize current configurable names while retaining historical archive verification/recovery compatibility.
+- Kept generic stream subdivision, ZIP representation, durable human sequence allocation, and storage-backend plugins outside this candidate.
+
 ## 0.4.0a5 — 2026-09-29
 
 - Completed the 0.4.0a4 normalization by tracking the existing `local/.gitignore` unchanged and documenting that other `local/` contents remain excluded from commits.

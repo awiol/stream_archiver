@@ -21,6 +21,11 @@ from stream_archiver.model import (
     PlannedAction,
     Stream,
 )
+from stream_archiver.naming import (
+    archive_unit_id,
+    render_archive_name,
+    validate_archive_name_length,
+)
 from stream_archiver.observability import log_event
 
 LOGGER = logging.getLogger(__name__)
@@ -131,11 +136,47 @@ def build_archive_plan(
     *,
     source_entries: tuple[Entry, ...] | None = None,
 ) -> ArchivePlan | None:
-    """Build one source-scoped deterministic plan.
+    """Build the single archive plan for an unpartitioned logical stream.
 
-    ``source_root`` must be one of the policy's configured sources. The caller
-    invokes this function independently for each source, so streams and final
-    directories never combine entries from different roots.
+    Call :func:`build_archive_plans` when archive-unit subdivision is enabled.
+    This compatibility wrapper rejects a multi-unit result rather than silently
+    dropping later units.
+    """
+
+    plans = build_archive_plans(
+        policy,
+        source_root,
+        stream,
+        source_entries=source_entries,
+    )
+    if not plans:
+        return None
+    if len(plans) != 1:
+        raise PlanningError(
+            "logical stream was subdivided into multiple archive units; use build_archive_plans()"
+        )
+    return plans[0]
+
+
+def build_archive_plans(
+    policy: Policy,
+    source_root: Path,
+    stream: Stream,
+    *,
+    source_entries: tuple[Entry, ...] | None = None,
+) -> tuple[ArchivePlan, ...]:
+    """Build deterministic archive-unit plans for one eligible logical stream.
+
+    Regular files are greedily assigned in deterministic stream order. A new
+    unit starts before a regular file when adding it would exceed either enabled
+    limit and the current unit already contains a regular file. A single file
+    larger than the byte limit remains intact and occupies one oversized unit.
+
+    Cleanup-only aliases follow their selected regular target. Other symlink
+    actions are assigned to the first unit whose last regular entry is not older
+    than the symlink; links after all regular files follow the final unit. This
+    keeps zero-byte link actions deterministic without making them consume the
+    regular-file limits.
     """
 
     if source_root not in policy.sources:
@@ -175,34 +216,145 @@ def build_archive_plan(
         }
     )
     if not payload_actions:
-        return None
+        return ()
 
     plan_id = _plan_id(policy, source_root, stream, actions)
-    payload_oldest = min(action.source.mtime_ns for action in payload_actions)
-    payload_newest = max(action.source.mtime_ns for action in payload_actions)
-    archive_name = (
-        f"{_format_timestamp(payload_oldest)}--{_format_timestamp(payload_newest)}--{plan_id[:10]}"
+    units = _partition_archive_actions(policy, source_root, actions, regular_entries)
+    unit_count = len(units)
+    plans: list[ArchivePlan] = []
+    for unit_index, unit_actions in enumerate(units):
+        unit_payload = tuple(
+            action
+            for action in unit_actions
+            if action.kind
+            in {
+                ActionKind.MOVE,
+                ActionKind.GZIP,
+                ActionKind.BZ2,
+                ActionKind.PRESERVE_SYMLINK,
+            }
+        )
+        if not unit_payload:
+            raise PlanningError("archive-unit partition produced a unit without payload")
+        payload_oldest = min(action.source.mtime_ns for action in unit_payload)
+        payload_newest = max(action.source.mtime_ns for action in unit_payload)
+        if policy.archive_name_template is None:
+            archive_name = (
+                f"{_format_timestamp(payload_oldest)}--{_format_timestamp(payload_newest)}--"
+                f"{plan_id[:10]}"
+            )
+        else:
+            archive_name = render_archive_name(
+                policy.archive_name_template,
+                start_mtime_ns=payload_oldest,
+                end_mtime_ns=payload_newest,
+                plan_id=plan_id,
+                unit_index=unit_index,
+            )
+            validate_archive_name_length(archive_name, policy.destination)
+        plans.append(
+            ArchivePlan(
+                policy_name=policy.name,
+                source_root=source_root,
+                destination_root=policy.destination,
+                plan_id=plan_id,
+                archive_name=archive_name,
+                stream=stream,
+                actions=unit_actions,
+                archive_unit_index=unit_index,
+                archive_unit_count=unit_count,
+            )
+        )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "archive_plan_built",
+            "deterministic archive-unit plan created",
+            policy=policy.name,
+            source=source_root,
+            archive=archive_name,
+            plan_id=plan_id,
+            archive_unit_id=archive_unit_id(plan_id, unit_index=unit_index),
+            archive_unit_index=unit_index,
+            archive_unit_count=unit_count,
+            actions=len(unit_actions),
+            payload_actions=len(unit_payload),
+        )
+    return tuple(plans)
+
+
+def _partition_archive_actions(
+    policy: Policy,
+    source_root: Path,
+    actions: tuple[PlannedAction, ...],
+    regular_entries: dict[Path, Entry],
+) -> tuple[tuple[PlannedAction, ...], ...]:
+    """Partition one logical stream's actions by regular-file limits."""
+
+    max_bytes = policy.archive_unit_max_source_bytes
+    max_files = policy.archive_unit_max_regular_files
+    if max_bytes is None and max_files is None:
+        return (actions,)
+
+    regular_actions = tuple(
+        sorted(
+            (
+                action
+                for action in actions
+                if action.source.kind is EntryKind.REGULAR
+                and action.kind in {ActionKind.MOVE, ActionKind.GZIP, ActionKind.BZ2}
+            ),
+            key=lambda action: (action.source.mtime_ns, action.source.relative_path.as_posix()),
+        )
     )
-    log_event(
-        LOGGER,
-        logging.DEBUG,
-        "archive_plan_built",
-        "deterministic archive plan created",
-        policy=policy.name,
-        source=source_root,
-        archive=archive_name,
-        actions=len(actions),
-        payload_actions=len(payload_actions),
-    )
-    return ArchivePlan(
-        policy_name=policy.name,
-        source_root=source_root,
-        destination_root=policy.destination,
-        plan_id=plan_id,
-        archive_name=archive_name,
-        stream=stream,
-        actions=actions,
-    )
+    if not regular_actions:
+        return (actions,)
+
+    regular_units: list[list[PlannedAction]] = [[]]
+    unit_bytes = 0
+    for action in regular_actions:
+        size = action.source.identity.size
+        current = regular_units[-1]
+        exceeds_files = max_files is not None and len(current) >= max_files
+        exceeds_bytes = max_bytes is not None and current and unit_bytes + size > max_bytes
+        if current and (exceeds_files or exceeds_bytes):
+            regular_units.append([])
+            current = regular_units[-1]
+            unit_bytes = 0
+        current.append(action)
+        unit_bytes += size
+
+    assignment: dict[Path, int] = {}
+    regular_keys: list[tuple[tuple[int, str], int]] = []
+    for unit_index, unit in enumerate(regular_units):
+        for action in unit:
+            assignment[action.source.relative_path] = unit_index
+        last = unit[-1].source
+        regular_keys.append(((last.mtime_ns, last.relative_path.as_posix()), unit_index))
+
+    unit_actions: list[list[PlannedAction]] = [[] for _ in regular_units]
+    for action in actions:
+        if action.source.kind is EntryKind.REGULAR:
+            unit_index = assignment[action.source.relative_path]
+        elif action.kind is ActionKind.DROP_ALIAS_SYMLINK:
+            target = _resolved_source_regular_target(
+                action.source.absolute_path, source_root, regular_entries
+            )
+            if target is None or target not in assignment:
+                raise PlanningError(
+                    "cleanup-only alias lost its selected regular target during subdivision"
+                )
+            unit_index = assignment[target]
+        else:
+            link_key = (action.source.mtime_ns, action.source.relative_path.as_posix())
+            unit_index = regular_keys[-1][1]
+            for last_key, candidate_index in regular_keys:
+                if link_key <= last_key:
+                    unit_index = candidate_index
+                    break
+        unit_actions[unit_index].append(action)
+
+    return tuple(tuple(unit) for unit in unit_actions)
 
 
 def boundary_entries_for_policy(
@@ -463,6 +615,17 @@ def _plan_id(
         "selection_oldest_mtime_ns": stream.oldest_mtime_ns,
         "selection_newest_mtime_ns": stream.newest_mtime_ns,
     }
+    if (
+        policy.archive_unit_max_source_bytes is not None
+        or policy.archive_unit_max_regular_files is not None
+    ):
+        # Partition policy changes archive-unit boundaries. Bind it into the
+        # logical plan identity only when subdivision is configured so the
+        # unsplit 0.5.0a1 identity remains stable.
+        payload["archive_unit_partition"] = {
+            "max_source_bytes": policy.archive_unit_max_source_bytes,
+            "max_regular_files": policy.archive_unit_max_regular_files,
+        }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

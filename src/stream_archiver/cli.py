@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import sys
+import tempfile
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +25,12 @@ from stream_archiver.errors import ConfigurationError, StreamArchiverError
 from stream_archiver.locking import resource_locks
 from stream_archiver.observability import configure_logging, log_event, start_run_context
 from stream_archiver.presentation import format_bytes, render_plan_summary
+from stream_archiver.reporting import (
+    build_run_report,
+    render_run_markdown,
+    render_run_summary,
+    run_report_data,
+)
 from stream_archiver.service import (
     PolicyPlan,
     PolicyRunResult,
@@ -180,14 +188,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                 operation="lock",
                 outcome="ignored",
             )
+        report_path = (
+            _prepare_report_path(arguments.report)
+            if arguments.command == "run" and arguments.report is not None
+            else None
+        )
         resources = _policy_resources(
             policies,
             state_path=arguments.state if arguments.command == "run-if-due" else None,
         )
         with resource_locks(resources, exclusive=True):
             if arguments.command == "run":
-                results = list(_run_policies_locked(policies))
-                _print_json([_run_summary(result) for result in results])
+                started_at = time.monotonic()
+                results = tuple(_run_policies_locked(policies))
+                elapsed_seconds = max(0.0, time.monotonic() - started_at)
+                report = build_run_report(results, elapsed_seconds=elapsed_seconds)
+                markdown = render_run_markdown(report)
+                if report_path is not None:
+                    try:
+                        _write_markdown_report(report_path, markdown)
+                    except OSError as exc:
+                        log_event(
+                            LOGGER,
+                            logging.WARNING,
+                            "run_report_export_failed",
+                            "archive run completed but Markdown report export failed",
+                            report=report_path,
+                            detail=str(exc),
+                            preserved_state="completed archives remain committed and verified",
+                            next_action=(
+                                "use the stdout result as available evidence; do not rerun "
+                                "archival solely to recreate this invocation report"
+                            ),
+                            retry_safe=False,
+                        )
+                    else:
+                        log_event(
+                            LOGGER,
+                            logging.INFO,
+                            "run_report_exported",
+                            "Markdown run report written",
+                            report=report_path,
+                        )
+                if arguments.json:
+                    _print_json(run_report_data(report))
+                elif arguments.markdown:
+                    sys.stdout.write(markdown)
+                else:
+                    sys.stdout.write(render_run_summary(report))
                 log_event(
                     LOGGER,
                     logging.INFO,
@@ -195,6 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "immediate policy run completed",
                     policy_count=len(results),
                     archive_count=sum(len(result.archives) for result in results),
+                    elapsed_seconds=elapsed_seconds,
                 )
                 return 0
             if arguments.command == "run-if-due":
@@ -290,6 +339,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", help="run selected policies immediately")
     run.add_argument("--lock-file", type=Path)
+    run_output = run.add_mutually_exclusive_group()
+    run_output.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the complete run result as JSON instead of the human summary",
+    )
+    run_output.add_argument(
+        "--markdown",
+        action="store_true",
+        help="emit the complete human run report as Markdown instead of the console summary",
+    )
+    run.add_argument(
+        "--report",
+        type=Path,
+        help="also write the complete Markdown run report to this new file",
+    )
 
     due = subparsers.add_parser(
         "run-if-due",
@@ -501,6 +566,9 @@ def _config_summary(config: AppConfig) -> dict[str, object]:
                 "symlink_rule": policy.symlink_rule.value,
                 "recursive": policy.recursive,
                 "stream_partition": policy.stream_partition.value,
+                "archive_name_template": policy.archive_name_template,
+                "archive_unit_max_source_bytes": policy.archive_unit_max_source_bytes,
+                "archive_unit_max_regular_files": policy.archive_unit_max_regular_files,
                 "compression_rules": [
                     {
                         "suffixes": list(rule.suffixes),
@@ -538,6 +606,9 @@ def _plan_summary(
                     {
                         "archive_name": item.archive_name,
                         "plan_id": item.plan_id,
+                        "archive_unit_id": item.archive_unit_id,
+                        "archive_unit_index": item.archive_unit_index,
+                        "archive_unit_count": item.archive_unit_count,
                         "selection_oldest_mtime_ns": item.stream.oldest_mtime_ns,
                         "selection_newest_mtime_ns": item.stream.newest_mtime_ns,
                         "payload_oldest_mtime_ns": item.payload_oldest_mtime_ns,
@@ -666,6 +737,73 @@ def _run_summary(result: PolicyRunResult) -> dict[str, object]:
             for item in result.archives
         ],
     }
+
+
+def _prepare_report_path(path: Path) -> Path:
+    """Resolve a new Markdown report path before destructive execution starts."""
+
+    expanded = path.expanduser()
+    candidate = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    if os.path.lexists(candidate):
+        raise ConfigurationError(f"run report path already exists: {candidate}")
+    try:
+        parent = candidate.parent.resolve(strict=True)
+    except OSError as exc:
+        raise ConfigurationError(
+            f"run report parent does not exist or cannot be resolved: {candidate.parent}: {exc}"
+        ) from exc
+    if not parent.is_dir():
+        raise ConfigurationError(f"run report parent is not a directory: {parent}")
+    return parent / candidate.name
+
+
+def _write_markdown_report(path: Path, content: str) -> None:
+    """Write one Markdown report without overwriting a concurrent existing path.
+
+    A temporary file is completed and synchronized first. A same-directory hard
+    link then publishes it only if the requested pathname is still unused. This
+    auxiliary report operation does not participate in archive transaction
+    success or source-deletion authority.
+    """
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except OSError:
+            # Cleanup is secondary to the write/publication failure. Preserve the
+            # original exception so the caller reports the correct failed operation.
+            pass
+        raise
+    else:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "run_report_temporary_cleanup_failed",
+                "Markdown run report was published but its temporary pathname remains",
+                report=path,
+                temporary=temporary,
+                detail=str(exc),
+                preserved_state="final Markdown report is published",
+                next_action="remove the temporary pathname when convenient",
+                retry_safe=True,
+            )
 
 
 def _print_json(value: object) -> None:

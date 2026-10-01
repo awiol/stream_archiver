@@ -22,14 +22,6 @@ The timestamp-gap rule is a heuristic, not a producer-completion protocol. Schem
 
 ## Development and local verification
 
-The repository may track `local/.gitignore` to define exclusions for operator-owned
-files under `local/`. Keep its rules unchanged when applying this repository
-convention. The ignore file itself is the only tracked content allowed under
-`local/`; policy files, logs, JSON output, and all other local contents remain
-ignored and must not be staged or committed. Check the index explicitly before
-committing local configuration work (for example, `git status --short` and
-`git diff --cached --name-only`).
-
 For a locked `uv` development environment:
 
 ```bash
@@ -119,7 +111,7 @@ ignored by the 0.4 safety lock domain.
 
 ## Logs and progress
 
-Stream Archiver creates no log file by default. Manual operational logs go to stderr. The generated systemd service leaves stderr under journald. Command results stay on stdout; `plan` is human-readable by default and `plan --json` provides its detailed machine representation. Every CLI invocation has a `run_id`.
+Stream Archiver creates no log file by default. Manual operational logs go to stderr. The generated systemd service leaves stderr under journald. Command results stay on stdout; `plan` and immediate `run` are human-readable by default. Use `plan --json` for action-level planning data and `run --json` for the complete machine run result. `run --markdown` emits the complete Markdown result to stdout. Every CLI invocation has a `run_id`.
 
 Useful fields include `phase`, `operation`, `outcome`, `policy_name`, `source_root`, `source_path`, `destination_root`, `archive_name`, `archive_directory`, and `plan_id` where applicable. `archive_action` identifies an archival operation; `next_action` is reserved for remediation.
 
@@ -173,7 +165,26 @@ This contract is bounded to the local-Linux-filesystem assumptions in
 
 Completed supported 0.3 and 0.4.0a1 archives remain verifiable. Valid v1 scheduling state is readable but affected policies are due until a successful v2 fingerprinted state record is written. Pending supported 0.3 cleanup uses the corrected verify-before-delete recovery ordering.
 
-Schema-1/2 configuration remains valid with recursive/source-root historical defaults. Use schema 3 when setting `recursive` or `stream_partition`. Because 0.4.0a2 adds those selection fields to the v2 policy fingerprint, a v2 fingerprint written by 0.4.0a1 intentionally mismatches once after upgrade; `run-if-due` therefore treats the policy as due and writes the a2 fingerprint only after successful completion. `plan` has been human-readable by default since 0.4.0a2; automation that consumed the 0.4.0a1 plan JSON must add `plan --json`.
+Schema-1/2 configuration remains valid with recursive/source-root historical defaults. Use schema 3 or 4 when setting `recursive` or `stream_partition`; use schema 4 for `archive_name_template`. Because 0.4.0a2 adds those selection fields to the v2 policy fingerprint, a v2 fingerprint written by 0.4.0a1 intentionally mismatches once after upgrade; `run-if-due` therefore treats the policy as due and writes the a2 fingerprint only after successful completion. `plan` has been human-readable by default since 0.4.0a2; automation that consumed the 0.4.0a1 plan JSON must add `plan --json`.
+
+`0.4.0a4` changes immediate `run` from implicit JSON to a human final summary. Automation that consumed the old immediate-run stdout must add `run --json`. `run-if-due` remains JSON and does not require that migration.
+
+`0.5.0a1` adds configuration schema 4 for configurable archive names. Schemas 1–3
+retain the historical archive directory naming algorithm. Moving a policy to schema
+4 changes its persistent namespace and scheduling fingerprint; run `plan` first and
+inspect the new `--sa-<identity>` names. Existing supported historical archives
+remain discoverable and verifiable alongside schema-4 archives.
+
+
+`0.5.0a2` adds schema 5 archive-unit subdivision controls. Existing schemas remain
+valid. Before enabling byte/file targets, review `plan --json`: one logical stream
+may now list multiple archive units with a shared `plan_id` and distinct unit
+indexes/identities. The source-byte limit is not a final-container-size guarantee.
+During execution, all units in one logical stream commit before any source cleanup;
+a later-unit failure can therefore leave earlier verified units pending while all
+sources remain available for deterministic retry.
+
+An optional `run --report PATH` writes the complete Markdown report only to a new pathname. Pre-existing report paths fail before destructive execution. If report publication fails after archival commits, inspect the WARNING event; completed archives remain authoritative and the CLI does not return archival failure solely because the auxiliary report could not be written.
 
 ## Capacity observations and low-space handling
 

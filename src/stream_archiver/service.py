@@ -31,15 +31,18 @@ from stream_archiver.executor import (
     ArchiveExecutionResult,
     ArchiveVerificationResult,
     _verify_archive_unlocked,
+    complete_committed_plans,
+    deferred_archive_unit_plan_ids,
     execute_plan,
     recover_pending_archives,
 )
 from stream_archiver.locking import resource_locks
 from stream_archiver.model import ArchivePlan
+from stream_archiver.naming import is_current_archive_name
 from stream_archiver.observability import log_event
 from stream_archiver.planning import (
     boundary_entries_for_policy,
-    build_archive_plan,
+    build_archive_plans,
     select_eligible_streams,
     split_partitioned_streams,
 )
@@ -142,15 +145,12 @@ def plan_policy(policy: Policy, *, now: datetime) -> PolicyPlan:
         plans = tuple(
             plan
             for stream in eligible
-            if (
-                plan := build_archive_plan(
-                    policy,
-                    source,
-                    stream,
-                    source_entries=entries,
-                )
+            for plan in build_archive_plans(
+                policy,
+                source,
+                stream,
+                source_entries=entries,
             )
-            is not None
         )
         log_event(
             LOGGER,
@@ -330,96 +330,138 @@ def _run_policies_at(
     stream_index = 0
     for item in prepared:
         archives: list[ArchiveExecutionResult] = []
+        groups: list[list[ArchivePlan]] = []
         for plan in item.plan.archive_plans:
+            if not groups or groups[-1][0].plan_id != plan.plan_id:
+                groups.append([plan])
+            else:
+                groups[-1].append(plan)
+
+        for group_list in groups:
+            group = tuple(group_list)
             stream_index += 1
             start_snapshot = progress.begin_stream(stream_index)
+            stream_files = sum(archive_regular_work(plan)[0] for plan in group)
+            stream_source_bytes = sum(archive_regular_work(plan)[1] for plan in group)
             _log_run_progress(
                 "run_stream_started",
-                "selected stream/archive execution started",
+                "selected logical stream execution started",
                 start_snapshot,
                 policy=item.policy.name,
-                archive=plan.archive_name,
-                destination=plan.destination_root,
+                plan_id=group[0].plan_id,
+                archive_units=len(group),
+                destination=group[0].destination_root,
             )
 
-            stream_files, stream_source_bytes = archive_regular_work(plan)
-            remaining_source_bytes = remaining_by_destination[plan.destination_root]
-            before = capacity_observer(plan.destination_root)
-            decision = warning_tracker.evaluate(
-                plan.destination_root,
-                before,
-                remaining_source_bytes=remaining_source_bytes,
-            )
-            _log_capacity_precheck(
-                before,
-                decision_reason=decision.reason if decision.warn else None,
-                current_stream_source_bytes=stream_source_bytes,
-                remaining_source_bytes=remaining_source_bytes,
-                policy=item.policy.name,
-                archive=plan.archive_name,
-            )
+            for plan in group:
+                progress.begin_archive_unit()
+                unit_files, unit_source_bytes = archive_regular_work(plan)
+                remaining_source_bytes = remaining_by_destination[plan.destination_root]
+                before = capacity_observer(plan.destination_root)
+                decision = warning_tracker.evaluate(
+                    plan.destination_root,
+                    before,
+                    remaining_source_bytes=remaining_source_bytes,
+                )
+                _log_capacity_precheck(
+                    before,
+                    decision_reason=decision.reason if decision.warn else None,
+                    current_stream_source_bytes=unit_source_bytes,
+                    remaining_source_bytes=remaining_source_bytes,
+                    policy=item.policy.name,
+                    archive=plan.archive_name,
+                )
+                existed_before = os.path.lexists(plan.final_directory)
 
-            existed_before = os.path.lexists(plan.final_directory)
+                def progress_sink(
+                    delta: ExecutionProgressDelta,
+                    policy_name: str = item.policy.name,
+                    archive_name: str = plan.archive_name,
+                    destination: Path = plan.destination_root,
+                ) -> None:
+                    """Fold executor byte observations into the invocation tracker."""
 
-            def progress_sink(
-                delta: ExecutionProgressDelta,
-                policy_name: str = item.policy.name,
-                archive_name: str = plan.archive_name,
-                destination: Path = plan.destination_root,
-            ) -> None:
-                """Fold executor byte observations into the invocation tracker."""
+                    milestone = progress.record_delta(delta)
+                    if milestone is not None:
+                        _log_run_progress(
+                            "run_progress",
+                            "selected source-byte progress crossed a work milestone",
+                            milestone,
+                            policy=policy_name,
+                            archive=archive_name,
+                            destination=destination,
+                        )
 
-                milestone = progress.record_delta(delta)
-                if milestone is not None:
-                    _log_run_progress(
-                        "run_progress",
-                        "selected source-byte progress crossed a work milestone",
-                        milestone,
-                        policy=policy_name,
-                        archive=archive_name,
-                        destination=destination,
-                    )
+                committed = execute_plan(
+                    plan,
+                    event_clock=event_clock,
+                    progress_sink=progress_sink,
+                    defer_cleanup=True,
+                )
+                remaining_after = max(0, remaining_source_bytes - unit_source_bytes)
+                remaining_by_destination[plan.destination_root] = remaining_after
+                after = capacity_observer(plan.destination_root)
+                if (
+                    not existed_before
+                    and isinstance(before, CapacitySnapshot)
+                    and isinstance(after, CapacitySnapshot)
+                ):
+                    allocation = allocated_tree_bytes(committed.archive_directory)
+                    if allocation is not None:
+                        assessment = assess_unexpected_capacity_consumption(
+                            free_before_bytes=before.free_bytes,
+                            free_after_bytes=after.free_bytes,
+                            known_allocation_bytes=allocation,
+                        )
+                        _log_capacity_change(
+                            plan.destination_root,
+                            assessment=assessment,
+                            remaining_source_bytes=remaining_after,
+                            policy=item.policy.name,
+                            archive=plan.archive_name,
+                        )
 
-            result = execute_plan(
-                plan,
-                event_clock=event_clock,
-                progress_sink=progress_sink,
-            )
-            archives.append(result)
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "run_archive_unit_committed",
+                    "archive unit committed and verified; logical-stream cleanup remains deferred",
+                    policy=item.policy.name,
+                    plan_id=plan.plan_id,
+                    archive=plan.final_directory,
+                    archive_unit_index=plan.archive_unit_index,
+                    archive_unit_count=plan.archive_unit_count,
+                    unit_regular_files=unit_files,
+                    unit_source_bytes=unit_source_bytes,
+                )
 
-            remaining_after = max(0, remaining_source_bytes - stream_source_bytes)
-            remaining_by_destination[plan.destination_root] = remaining_after
-            after = capacity_observer(plan.destination_root)
-            if (
-                not existed_before
-                and isinstance(before, CapacitySnapshot)
-                and isinstance(after, CapacitySnapshot)
-            ):
-                allocation = allocated_tree_bytes(result.archive_directory)
-                if allocation is not None:
-                    assessment = assess_unexpected_capacity_consumption(
-                        free_before_bytes=before.free_bytes,
-                        free_after_bytes=after.free_bytes,
-                        known_allocation_bytes=allocation,
-                    )
-                    _log_capacity_change(
-                        plan.destination_root,
-                        assessment=assessment,
-                        remaining_source_bytes=remaining_after,
-                        policy=item.policy.name,
-                        archive=plan.archive_name,
-                    )
+            completed_group = complete_committed_plans(group, event_clock=event_clock)
+            archives.extend(completed_group)
+            for plan, result in zip(group, completed_group, strict=True):
+                progress.complete_archive_unit(plan)
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "run_archive_unit_completed",
+                    "archive-unit cleanup and success evidence completed",
+                    policy=item.policy.name,
+                    plan_id=plan.plan_id,
+                    archive=result.archive_directory,
+                    archive_unit_index=plan.archive_unit_index,
+                    archive_unit_count=plan.archive_unit_count,
+                )
 
-            completed_snapshot = progress.complete_stream(plan)
+            completed_snapshot = progress.snapshot()
             _log_run_progress(
                 "run_stream_completed",
-                "selected stream/archive transaction completed",
+                "selected logical stream completed after all archive units",
                 completed_snapshot,
                 policy=item.policy.name,
-                archive=result.archive_directory,
-                destination=plan.destination_root,
+                plan_id=group[0].plan_id,
+                destination=group[0].destination_root,
                 stream_regular_files=stream_files,
                 stream_source_bytes=stream_source_bytes,
+                archive_units=len(group),
             )
 
         policy_result = PolicyRunResult(
@@ -476,7 +518,24 @@ def _prepare_policy_run(
             event_clock=event_clock,
         )
     )
+    deferred_by_source = {
+        source: deferred_archive_unit_plan_ids(policy.destination, source)
+        for source in policy.sources
+    }
     plan = plan_policy(policy, now=planning_time)
+    for source_plan in plan.source_plans:
+        deferred = deferred_by_source[source_plan.source_root]
+        if not deferred:
+            continue
+        planned_ids = {archive.plan_id for archive in source_plan.archive_plans}
+        unmatched = deferred - planned_ids
+        if unmatched:
+            joined = ", ".join(sorted(unmatched))
+            raise RecoveryError(
+                "incomplete archive-unit group cannot be reconstructed by current planning "
+                f"for source {source_plan.source_root}: {joined}; restore the prior "
+                "partition/source state or reconcile the pending group before continuing"
+            )
     return _PreparedPolicyRun(policy, recovered, plan)
 
 
@@ -685,7 +744,9 @@ def _verify_destination_locked(
         if child.name == ".stream-archiver-staging" or child.is_symlink() or not child.is_dir():
             continue
         manifest_path = child / MANIFEST_NAME
-        archive_shaped = _ARCHIVE_NAME_PATTERN.fullmatch(child.name) is not None
+        archive_shaped = _ARCHIVE_NAME_PATTERN.fullmatch(
+            child.name
+        ) is not None or is_current_archive_name(child.name)
         if not manifest_path.is_file():
             if archive_shaped:
                 raise RecoveryError(f"archive-shaped directory is missing {MANIFEST_NAME}: {child}")

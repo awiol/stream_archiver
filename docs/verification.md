@@ -77,7 +77,29 @@ minimum retain tests for:
 - planning and execution capacity comparisons preserve exact bytes and remain advisory;
 - repeated low-space warnings follow semantic state rather than elapsed time;
 - unexpected-capacity diagnostics use neutral causal wording; and
-- an `ENOSPC` after a sufficient advisory observation still fails through the normal execution path without false source cleanup.
+- an `ENOSPC` after a sufficient advisory observation still fails through the normal execution path without false source cleanup;
+- final run reporting matches mixed uncompressed/gzip/bzip2 execution evidence;
+- zero-byte and compression-expansion cases preserve signed savings and null ratio/percentage semantics;
+- extension × transformation machine data remains complete while console output is bounded;
+- recovered prior archives remain separate from newly selected work;
+- immediate `run`, `run --json`, and `run --markdown` render one result model;
+- an existing `--report` path prevents destructive execution; and
+- a post-commit report-export failure warns without converting completed archive transactions into failed archival work;
+- archive-unit identity is stable for the same plan and differs for different deterministic unit indexes;
+- schema 4 uses controlled configurable names with a mandatory stable suffix while schemas 1–3 retain legacy naming;
+- fixed English month/weekday tokens and opt-in sub-second directives are locale-independent;
+- unsafe/unknown template syntax and overlong rendered names are rejected before archive mutation;
+- policy fingerprints change when archive naming policy changes;
+- current-format destination entries with missing manifests are not silently ignored; and
+- a current archive name whose stable suffix disagrees with the manifest plan identity is rejected;
+- schema 5 deterministically subdivides one logical stream by source-byte and/or regular-file targets;
+- a single oversized regular file remains indivisible and may exceed the byte target alone;
+- changing subdivision limits changes logical/unit identity while unpartitioned 0.5.0a1 identity remains stable;
+- alias cleanup follows the archive unit containing its target;
+- manifest-format-3 unit identity/index/count are reconciled against the selected plan;
+- interruption after an earlier unit commit but before a later unit commit leaves all logical-stream sources intact; and
+- rerun after that interruption reuses deterministic unit identities and completes the group before cleanup; and
+- changing partition identity while such a group is incomplete stops before new mutation or cleanup.
 
 Where practical, execute the discriminating regression against the exact prior
 baseline and record that it fails in the expected way.

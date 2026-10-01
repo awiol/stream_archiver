@@ -13,6 +13,7 @@ from typing import Any
 
 from stream_archiver.durations import parse_duration
 from stream_archiver.errors import ConfigurationError
+from stream_archiver.naming import DEFAULT_ARCHIVE_NAME_TEMPLATE, validate_archive_name_template
 from stream_archiver.observability import log_event
 
 LOGGER = logging.getLogger(__name__)
@@ -113,6 +114,9 @@ class Policy:
     compression_rules: tuple[CompressionRule, ...]
     recursive: bool = True
     stream_partition: StreamPartition | str = StreamPartition.SOURCE_ROOT
+    archive_name_template: str | None = None
+    archive_unit_max_source_bytes: int | None = None
+    archive_unit_max_regular_files: int | None = None
 
     def __post_init__(self) -> None:
         """Reject unsafe programmatic policies before planning or execution."""
@@ -175,6 +179,21 @@ class Policy:
             choices = ", ".join(item.value for item in StreamPartition)
             raise ConfigurationError(f"policy stream_partition must be one of: {choices}") from exc
         object.__setattr__(self, "stream_partition", partition)
+        if self.archive_name_template is not None:
+            validate_archive_name_template(self.archive_name_template)
+        for field_name, value in (
+            ("archive_unit_max_source_bytes", self.archive_unit_max_source_bytes),
+            ("archive_unit_max_regular_files", self.archive_unit_max_regular_files),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ConfigurationError(f"{field_name} must be a positive integer or null")
+        if (
+            self.archive_unit_max_source_bytes is not None
+            or self.archive_unit_max_regular_files is not None
+        ) and self.archive_name_template is None:
+            object.__setattr__(self, "archive_name_template", DEFAULT_ARCHIVE_NAME_TEMPLATE)
         _validate_suffix_ownership(self.compression_rules, f"policy {self.name!r}")
 
     def compression_for(self, relative_path: Path) -> CompressionCodec | None:
@@ -222,13 +241,19 @@ _POLICY_KEYS_BASE = frozenset(
     }
 )
 _POLICY_KEYS_V3 = _POLICY_KEYS_BASE | frozenset({"recursive", "stream_partition"})
+_POLICY_KEYS_V4 = _POLICY_KEYS_V3 | frozenset({"archive_name_template"})
+_POLICY_KEYS_V5 = _POLICY_KEYS_V4 | frozenset(
+    {"archive_unit_max_source_bytes", "archive_unit_max_regular_files"}
+)
 _COMPRESSION_KEYS = frozenset({"suffixes", "compression"})
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
 
 
 def load_config(path: Path) -> AppConfig:
     """Load and validate a TOML configuration file.
 
+    Schema version 5 adds deterministic archive-unit subdivision limits.
+    Schema version 4 adds configurable archive naming with stable identity suffixes.
     Schema version 3 adds explicit recursive discovery and stream partitioning.
     Schema version 2 introduced the preferred ``sources = [...]`` form and both
     gzip and bzip2. Versions 1 and 2 remain accepted with their historical
@@ -335,7 +360,14 @@ def _parse_policy(raw: Any, index: int, *, schema_version: int) -> Policy:
     context = f"policies[{index}]"
     if not isinstance(raw, dict):
         raise ConfigurationError(f"{context} must be a table")
-    allowed = _POLICY_KEYS_V3 if schema_version >= 3 else _POLICY_KEYS_BASE
+    if schema_version >= 5:
+        allowed = _POLICY_KEYS_V5
+    elif schema_version >= 4:
+        allowed = _POLICY_KEYS_V4
+    elif schema_version >= 3:
+        allowed = _POLICY_KEYS_V3
+    else:
+        allowed = _POLICY_KEYS_BASE
     _reject_unknown(raw, allowed, context=context)
 
     name = _required_nonempty_string(raw, "name", context)
@@ -370,6 +402,15 @@ def _parse_policy(raw: Any, index: int, *, schema_version: int) -> Policy:
     except ValueError as exc:
         choices = ", ".join(item.value for item in StreamPartition)
         raise ConfigurationError(f"{context}.stream_partition must be one of: {choices}") from exc
+    archive_name_template = (
+        raw.get("archive_name_template", DEFAULT_ARCHIVE_NAME_TEMPLATE)
+        if schema_version >= 4
+        else None
+    )
+    if archive_name_template is not None and not isinstance(archive_name_template, str):
+        raise ConfigurationError(f"{context}.archive_name_template must be a string")
+    max_source_bytes = raw.get("archive_unit_max_source_bytes") if schema_version >= 5 else None
+    max_regular_files = raw.get("archive_unit_max_regular_files") if schema_version >= 5 else None
     return Policy(
         name=name,
         sources=sources,
@@ -380,6 +421,9 @@ def _parse_policy(raw: Any, index: int, *, schema_version: int) -> Policy:
         compression_rules=compression_rules,
         recursive=recursive,
         stream_partition=stream_partition,
+        archive_name_template=archive_name_template,
+        archive_unit_max_source_bytes=max_source_bytes,
+        archive_unit_max_regular_files=max_regular_files,
     )
 
 

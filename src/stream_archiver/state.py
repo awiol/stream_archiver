@@ -78,6 +78,9 @@ def policy_fingerprint(policy: Policy) -> str:
         "symlink_rule": policy.symlink_rule.value,
         "recursive": policy.recursive,
         "stream_partition": policy.stream_partition.value,
+        "archive_name_template": policy.archive_name_template,
+        "archive_unit_max_source_bytes": policy.archive_unit_max_source_bytes,
+        "archive_unit_max_regular_files": policy.archive_unit_max_regular_files,
         "compression_rules": [
             {
                 "suffixes": list(rule.suffixes),

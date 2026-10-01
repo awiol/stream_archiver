@@ -31,7 +31,8 @@ class RunTotals:
             files, byte_count = archive_regular_work(plan)
             regular_files += files
             source_bytes += byte_count
-        return cls(streams=len(plans), regular_files=regular_files, source_bytes=source_bytes)
+        logical_streams = len({(str(plan.source_root), plan.plan_id) for plan in plans})
+        return cls(streams=logical_streams, regular_files=regular_files, source_bytes=source_bytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,12 @@ class RunProgressTracker:
         self._current_stream_source_bytes = 0
         return self.snapshot()
 
+    def begin_archive_unit(self) -> RunProgressSnapshot:
+        """Reset per-unit byte reconciliation while retaining the logical stream ordinal."""
+
+        self._current_stream_source_bytes = 0
+        return self.snapshot()
+
     def record_delta(self, delta: ExecutionProgressDelta) -> RunProgressSnapshot | None:
         """Apply executor byte observations and return a source milestone snapshot.
 
@@ -134,8 +141,8 @@ class RunProgressTracker:
             return self.snapshot()
         return None
 
-    def complete_stream(self, plan: ArchivePlan) -> RunProgressSnapshot:
-        """Mark one successfully completed archive transaction as complete.
+    def complete_archive_unit(self, plan: ArchivePlan) -> RunProgressSnapshot:
+        """Mark one successfully completed archive-unit transaction as complete.
 
         Successful reconciliation can complete a selected archive without
         copying every source byte during this invocation. In that case, account
@@ -155,6 +162,11 @@ class RunProgressTracker:
             raise ValueError("processed source bytes exceed the selected total")
         self._current_stream_source_bytes = source_bytes
         return self.snapshot()
+
+    def complete_stream(self, plan: ArchivePlan) -> RunProgressSnapshot:
+        """Compatibility alias for one-unit logical streams."""
+
+        return self.complete_archive_unit(plan)
 
     def snapshot(self) -> RunProgressSnapshot:
         """Return current counters with non-decreasing monotonic elapsed time."""

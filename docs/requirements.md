@@ -1,10 +1,10 @@
 # Stream Archiver Requirements
 
-**Document version:** `0.4.0-alpha.4`
-**Target package development version:** `0.4.0a3`
-**Date:** 2026-09-27
-**Status:** implementation contract for the third 0.4 alpha candidate
-**Repository intent:** repository requirements; supersedes document version 0.4.0-alpha.3
+**Document version:** `0.5.0-alpha.2`
+**Target package development version:** `0.5.0a2`
+**Date:** 2026-09-29
+**Status:** implementation contract for the second 0.5 alpha candidate
+**Repository intent:** repository requirements; supersedes document version 0.4.0-alpha.5
 
 ## 1. Purpose
 
@@ -73,6 +73,24 @@ An **archive directory** is one committed destination directory for one archive 
 ### 3.12 Restore
 
 **Restore** means copying or reconstructing archived content back into operational source/use locations. Restore is outside the current product scope.
+
+### 3.13 Run report
+
+A **run report** is the final invocation-level result for newly selected archival work. It records exact execution outcomes after successful selected work and keeps recovery of previously committed archives separate. Human, JSON, and Markdown forms are renderings of the same result model.
+
+### 3.14 Archive unit
+
+An **archive unit** is one persistent archive transaction derived from one logical
+stream. In `0.5.0a1`, each logical stream still produces exactly one archive unit.
+The term is introduced before stream subdivision so persistent identity and naming
+do not depend on the directory representation or on invocation-local stream order.
+
+### 3.15 Archive-unit identity
+
+An **archive-unit identity** is a deterministic format-neutral identifier derived
+from the logical archive plan plus a deterministic unit index. The current unit
+index is zero. It must not use `stream_index / stream_total` or another
+invocation-local ordinal as persistent identity.
 
 ## 4. Scope and non-goals
 
@@ -441,6 +459,12 @@ A legacy `--lock-file` option may remain temporarily accepted for operator compa
 
 Operators upgrading from 0.3 must regenerate generated service units. Old units contain obsolete prerequisite and lock-file semantics and are not the 0.4 deployment contract.
 
+### R-COMPAT-007 — Immediate-run output migration
+
+`stream-archiver run` changes from implicit JSON output in `0.4.0a3` to a human-readable final report by default in `0.4.0a4`. Automation that consumes the immediate-run result must use `run --json`. This is an intentional incompatible pre-1.0 CLI presentation change authorized for the 0.4 alpha line.
+
+`run-if-due` retains its scheduled machine-oriented JSON result contract. The immediate-run change must not silently alter scheduled due-state output.
+
 ## 16. Planning and operator-output requirements
 
 ### R-PLAN-001 — Human-readable default plan
@@ -461,7 +485,7 @@ Archive payload paths must preserve source-relative structure. Recursive discove
 
 ### R-LOG-001 — Output separation
 
-Machine-readable command results must remain on stdout. Operational logs must remain on stderr/journald.
+Command results and human command presentations must remain on stdout. Operational logs must remain on stderr/journald. A machine-readable output mode must not be mixed with unrelated human prose on stdout.
 
 ### R-LOG-002 — Stable structured fields
 
@@ -609,7 +633,14 @@ A 0.4 alpha candidate must not be promoted beyond its declared maturity until ex
 28. execution rechecks capacity before every selected stream and suppresses repeated warnings by semantic state rather than time;
 29. a low-space advisory does not become a hard execution gate and a later `ENOSPC` cannot produce false completion;
 30. material unexpected-capacity diagnostics use neutral causal wording and exact arithmetic; and
-31. source-tree and installed-wheel tests cover the `0.4.0a3` progress/capacity behavior on the final candidate.
+31. source-tree and installed-wheel tests cover the `0.4.0a3` progress/capacity behavior on the final candidate;
+32. final run-report totals match observed regular payload results for mixed uncompressed/gzip/bzip2 work;
+33. zero-source-byte and compression-expansion cases preserve exact arithmetic without invented ratios;
+34. original-extension and transformation cross-tabulation is complete in machine data while the console summary remains bounded;
+35. recovered prior archives remain separate from newly selected run totals;
+36. default `run` output is human-readable and explicit `run --json`/`run --markdown` render the same result model;
+37. an existing Markdown report path blocks before destructive mutation; and
+38. a post-commit Markdown export failure remains an auxiliary warning and does not relabel committed archival work as uncommitted or failed.
 
 Regression tests for safety defects must demonstrate sensitivity to the corresponding pre-fix behavior when practical; a test that passes only on the corrected implementation is not by itself sensitivity evidence.
 
@@ -623,7 +654,7 @@ The following decisions close the open items in the 0.4.0-alpha.1 draft:
 4. Destination-wide audit is spelled `stream-archiver verify --all-in-destination`.
 5. The policy fingerprint includes ordered canonical sources, canonical destination, `minimum_age`, `stream_gap`, symlink rule, and ordered compression rules. Logging and timer-presentation settings are excluded.
 
-These foundation decisions remain requirements through `0.4.0a3`; they are no longer open proposals.
+These foundation decisions remain requirements through `0.4.0a4`; they are no longer open proposals.
 
 
 ## 22. 0.4.0a2 consolidation decisions
@@ -795,3 +826,333 @@ requirements.
 4. Capacity warnings remain advisory. No preflight reservation or hard low-space gate is introduced.
 5. The 64 MiB / 5% dual thresholds are operator-noise heuristics with explicit review triggers, not safety guarantees.
 6. Invocation-local stream ordinal is runtime state only and does not become persistent archive identity.
+
+
+## 25. 0.4.0a4 final run-report contract
+
+The fourth alpha extends the `0.4.0a3` accounting boundary into a durable result
+model and presentation layer. It does not change archive directory identity,
+archive transaction semantics, source cleanup, compression policy, storage
+backend, or stream selection.
+
+### R-REPORT-001 — One authoritative run-result model
+
+After a successful immediate `run`, the implementation must construct one
+invocation-level result model from completed execution evidence. Human console,
+JSON, and Markdown output must render this model rather than independently
+recalculate totals.
+
+The model must identify at least elapsed run runtime, selected logical streams,
+completed archive units, completed regular files, selected link dispositions,
+source bytes, transformed written payload bytes, and prior recovered archives.
+Recovery completed before new planning must remain separate from newly selected
+work totals.
+
+### R-REPORT-002 — Exact byte and savings definitions
+
+For newly selected completed regular payloads:
+
+- `source_bytes` is the sum of original regular source sizes represented by the
+  completed selected work;
+- `written_payload_bytes` is the sum of finalized transformed regular payload
+  object sizes;
+- `saved_payload_bytes = source_bytes - written_payload_bytes`;
+- `payload_size_ratio = written_payload_bytes / source_bytes` when
+  `source_bytes > 0`; and
+- `payload_savings_percent = saved_payload_bytes / source_bytes * 100` when
+  `source_bytes > 0`.
+
+`payload_size_ratio` and `payload_savings_percent` must be absent/null rather
+than invented when the denominator is zero. `saved_payload_bytes` may be
+negative when transformation expands data. Human output must not clamp such an
+observation to zero or describe it as positive savings.
+
+### R-REPORT-003 — Transformation disposition
+
+The result must report regular-file count, source bytes, written payload bytes,
+and derived savings separately for `uncompressed`, `gzip`, and `bzip2`
+transformations that occurred. Historical manifest action `copy` and current
+`move` both belong to the `uncompressed` reporting category.
+
+Content transformation is distinct from a future archive/container compression
+mechanism. A future ZIP representation must not silently reuse these fields for
+container compression.
+
+### R-REPORT-004 — Original-extension disposition
+
+The result must group regular payload outcomes by the original source filename's
+final suffix, case-normalized. An extensionless source uses the explicit
+`<none>` group. Machine-readable output and Markdown must preserve the complete
+original-extension × transformation cross-tabulation.
+
+The human console summary must bound extension rows and aggregate omitted groups
+without changing the complete underlying result.
+
+### R-REPORT-005 — Link disposition
+
+The report must expose selected symlink dispositions available from completed
+archive transactions, including preserved relative symlinks, removed alias
+symlinks, and skipped symlinks when a completed plan contains them. It must not
+infer a count for symlinks that discovery/policy rules excluded from selected
+archive plans.
+
+### R-REPORT-006 — Immediate-run rendering modes
+
+`stream-archiver run` must render the bounded human summary by default.
+`stream-archiver run --json` must emit the complete machine-readable result as
+one valid JSON value. `stream-archiver run --markdown` must emit a complete
+human-oriented Markdown report. These modes are mutually exclusive.
+
+Structured JSON must retain exact integer byte fields. Human renderers use the
+shared decimal-SI formatter. `run-if-due` remains machine-oriented JSON and is
+not changed into a human report by this candidate.
+
+### R-REPORT-007 — Optional Markdown report file
+
+`stream-archiver run --report <path>` may additionally write the Markdown
+renderer output as an auxiliary invocation artifact. The final path must be new.
+If it already exists during preflight, the command must stop before destructive
+archival work rather than overwrite it.
+
+The exporter must first complete a same-directory temporary file and publish the
+requested pathname without overwriting a concurrently created file. A report
+export failure after successful archival commit must be logged as an actionable
+warning. It must not roll back, invalidate, or relabel completed archives, and it
+must not make the archival command return failure solely because this auxiliary
+file could not be published.
+
+The Markdown file is not archive payload, archive provenance, or completion
+evidence. Stream Archiver does not create it unless the operator requests
+`--report`.
+
+### R-REPORT-008 — Metric boundaries for future archive representations
+
+`written_payload_bytes` excludes manifest/checksum/success evidence, directory
+metadata, filesystem block allocation, and future archive-container overhead.
+The run-result schema reserves separate `archive_container_bytes` and
+`filesystem_allocation_bytes` concepts; they remain null when this candidate has
+no applicable authoritative invocation-level measurement.
+
+A later archive representation or storage backend must add its observations
+without redefining the existing payload fields.
+
+## 26. 0.4.0a4 candidate decisions
+
+1. The exact candidate advances to `0.4.0a4`; target release core remains `0.4.0`.
+2. The candidate is one coherent reporting increment over the accounting evidence introduced in `0.4.0a3`.
+3. Immediate `run` becomes human-readable by default; automation migrates to explicit `run --json`.
+4. `run-if-due` keeps its existing machine-oriented JSON result because scheduled execution is a separate operator/automation surface.
+5. The Markdown report file is opt-in and auxiliary. Existing paths fail before mutation; post-commit export failures are warnings and do not change archive success.
+6. Payload savings can be negative. Ratio/percentage values are undefined for zero source bytes and are represented as null/`n/a` rather than fabricated values.
+7. Original-extension grouping uses the final source suffix, case-folded, with `<none>` for extensionless files. Compound-extension interpretation is not added in this candidate.
+8. ZIP representation, archive-unit partitioning, configurable archive naming, storage-backend interfaces, and durable sequence allocation remain outside `0.4.0a4`.
+
+
+## 27. 0.5.0a1 archive-unit identity and naming contract
+
+The first 0.5 alpha changes the persistent archive namespace while preserving the
+existing directory representation, transaction ordering, source selection, and
+cleanup/recovery safety contracts.
+
+### R-NAME-001 — Format-neutral archive-unit identity
+
+Each `ArchivePlan` must expose a full deterministic archive-unit identity that is
+distinct from its human archive name. The identity must be domain-separated from
+the plan identifier and must include a deterministic non-negative archive-unit
+index. `0.5.0a1` uses index zero because subdivision is not yet implemented.
+
+The archive-unit identity must not depend on invocation-local progress ordinals,
+wall-clock execution time, locale, archive representation, or a human naming
+template.
+
+### R-NAME-002 — Mandatory stable name suffix
+
+A schema-4 archive name must end with `--sa-` followed by the first 20 lowercase
+hexadecimal characters of the archive-unit identity. The human prefix may change
+with configuration, but the mandatory suffix is not configurable.
+
+If two different plans produce the same human prefix, the stable suffix must keep
+the normal names distinct unless the truncated cryptographic identities collide.
+An existing final path with mismatching manifest identity remains a hard collision;
+the implementation must not overwrite or merge it.
+
+### R-NAME-003 — Controlled human template
+
+Configuration schema 4 must support per-policy `archive_name_template`. The
+template may contain literal text and the fields `start`, `end`, and `span`.
+`start` and `end` describe payload-producing modification-time bounds in UTC;
+`span` describes their non-negative difference.
+
+Timestamp formats must support deterministic numeric fields plus fixed English
+three-letter month (`%b`) and weekday (`%a`) names without depending on process
+locale. `%f` (microseconds) and `%N` (nanoseconds) are explicit opt-in
+sub-second directives. If the timestamp format is omitted, it must contain whole
+seconds only.
+
+The span formatter must support deterministic days/hours/minutes/seconds and
+explicit opt-in microsecond/nanosecond fields. The human prefix is descriptive;
+precision omitted from it does not weaken the stable archive-unit identity.
+
+### R-NAME-004 — Safe filename grammar and bounds
+
+The naming template and rendered prefix must reject path separators, NUL, the
+reserved `--sa-` marker, unsupported fields/directives, nested replacement
+fields, and conversion operators. The rendered prefix must not be empty, `.` or
+`..`. Planning must reject a rendered final name that exceeds the destination
+filesystem's observed `PC_NAME_MAX`; when that query is unavailable, the
+implementation uses the Linux-oriented 255-byte fallback and still relies on
+normal filesystem errors as the final authority.
+
+### R-NAME-005 — Explicit schema migration
+
+Schemas 1–3 must remain readable with their historical archive-name algorithm.
+They must reject `archive_name_template` as an unknown key. Schema 4 must use
+`archive_name_template` when supplied and otherwise use the current default
+`{start:%Y%m%dT%H%M%SZ}--{end:%Y%m%dT%H%M%SZ}` before the mandatory stable
+identity suffix.
+
+Programmatic `Policy` construction must preserve the historical name algorithm
+when `archive_name_template` is `None`; a non-null template explicitly opts into
+the current naming contract.
+
+### R-NAME-006 — Recovery and verification compatibility
+
+Verification and recovery must continue to accept supported historical archive
+directories. Destination-wide verification must also recognize current
+`--sa-<identity-suffix>` directory names as archive-shaped even when the human
+prefix is arbitrary. A current-format archive name must be rejected when its
+identity suffix does not match the manifest `plan_id` under the current
+archive-unit identity derivation.
+
+### R-NAME-007 — Scheduling fingerprint
+
+The policy fingerprint used by `run-if-due` must include the effective archive
+name template. Changing persistent naming policy therefore makes a previously
+successful policy conservatively due once, and the new fingerprint is stored
+only after successful completion.
+
+### R-NAME-008 — Machine plan observability
+
+The complete JSON planning surface must expose `archive_unit_id` and
+`archive_unit_index` separately from `archive_name` and `plan_id`. The human
+archive name remains presentation/persistent namespace; the full identity remains
+machine-readable.
+
+### R-NAME-009 — Scope boundary
+
+`0.5.0a1` must not subdivide a logical stream, create ZIP archives, add a durable
+human sequence allocator, or introduce a destination-storage plugin contract.
+Those remain separate planned/deferred changes.
+
+## 28. 0.5.0a1 candidate decisions
+
+1. Package, requirements, and design candidate identities align at `0.5.0-alpha.1`; historical mismatched document versions remain immutable.
+2. Configuration schema 4 is the explicit opt-in boundary for the new persistent namespace; schemas 1–3 preserve historical names.
+3. The full archive-unit identity is SHA-256 over a domain-separated canonical record containing `plan_id` and deterministic `unit_index`.
+4. The persistent name suffix uses 20 hexadecimal identity characters (80 bits); the complete identity remains available in machine planning output.
+5. Current one-stream/one-unit behavior uses unit index zero. Future subdivision must define deterministic unit ordering before using additional indexes.
+6. Human names are configurable but never authoritative identity. Locale-dependent `strftime()` output is not used for `%a`/`%b`.
+7. ZIP, generic subdivision, durable sequence allocation, and storage-backend abstraction remain outside this candidate.
+
+
+## 29. 0.5.0a2 archive-unit subdivision contract
+
+The second 0.5 alpha adds deterministic subdivision of one logical stream into
+multiple directory archive units. It does not add ZIP representation or a
+non-filesystem destination backend.
+
+### R-PART-001 — Explicit schema-5 partition controls
+
+Configuration schema 5 may set `archive_unit_max_source_bytes` and
+`archive_unit_max_regular_files` per policy. Each supplied value must be a
+positive non-boolean integer. Schemas 1–4 must reject these fields. Absence of
+both limits preserves one archive unit per logical stream.
+
+### R-PART-002 — Deterministic greedy subdivision
+
+When at least one limit is configured, regular payload actions must be ordered
+deterministically by source modification time and source-relative path. The
+planner must start a new archive unit before adding a regular file when adding
+it would exceed the byte target or when the current unit has already reached
+the regular-file target.
+
+`archive_unit_max_source_bytes` is based on original regular source bytes. It is
+not a bound on transformed payload bytes, filesystem allocation, or a future
+ZIP/container size.
+
+### R-PART-003 — Files remain indivisible
+
+Subdivision must not split one regular file. A single regular file larger than
+the byte target must occupy one archive unit by itself. The resulting unit may
+therefore exceed the configured source-byte target.
+
+### R-PART-004 — Deterministic link placement
+
+A cleanup-only alias symlink must be assigned to the archive unit that contains
+its selected regular target. Other selected symlink actions do not consume the
+regular-file or source-byte limits and must be assigned deterministically so a
+replan of unchanged inputs yields the same unit allocation.
+
+### R-PART-005 — Logical-plan and archive-unit identity
+
+All units produced from one logical stream must share one `plan_id`. The
+`plan_id` must include the effective partition limits when subdivision is
+configured because those limits can change unit contents. Unpartitioned plans
+must preserve the `0.5.0a1` plan/archive-unit identity derivation.
+
+Each archive unit must expose a zero-based deterministic `archive_unit_index`,
+the common positive `archive_unit_count`, and the archive-unit identity derived
+from `plan_id` plus index. Machine planning output must expose all three values.
+
+### R-PART-006 — Commit all units before source cleanup
+
+For a subdivided logical stream, execution must commit and verify every archive
+unit before cleanup of any source entry in that logical stream starts. A commit
+failure in a later unit must therefore leave all source entries intact even if
+earlier units already exist as verified pending archives.
+
+Before cleanup begins, execution must revalidate source state for every pending
+unit. Only after the complete unit set is committed and verified may cleanup
+proceed in deterministic unit order.
+
+### R-PART-007 — Group-aware pending recovery
+
+Manifest format 3 must record `archive_unit_id`, `archive_unit_index`, and
+`archive_unit_count`. Recovery must validate those fields. A pending format-3
+unit set that is incomplete must not authorize source cleanup. Once all declared
+units are present and valid, recovery may complete the group under the same
+verify-before-delete contract. If current planning cannot reconstruct the same
+logical `plan_id` for an incomplete pending group, execution must stop before new
+archive mutation or source cleanup and require reconciliation. Historical
+supported manifest formats remain readable under their prior single-archive
+semantics.
+
+### R-PART-008 — Stream and archive-unit accounting remain distinct
+
+Progress and final reporting must count one logical stream once even when it is
+represented by several archive units. `archive_units_completed` and unit-level
+logs may count each committed unit separately. Invocation-local stream ordinals
+must not become persistent archive identity.
+
+### R-PART-009 — Existing representation remains unchanged
+
+Every archive unit in `0.5.0a2` remains a local directory with the existing
+staging, atomic namespace commit, payload verification, durability, and success
+evidence. ZIP representation is a later feature.
+
+### R-PART-010 — No hard final-container-size claim
+
+The source-byte target is a deterministic planning target, not a guarantee that
+a future archive container has a particular byte size. A hard ZIP-size limit,
+if later required, must use representation-specific evidence and must not be
+inferred from this requirement.
+
+## 30. 0.5.0a2 candidate decisions
+
+1. Package, requirements, and design candidate identities align at `0.5.0-alpha.2`.
+2. Configuration schema 5 is the explicit opt-in boundary for subdivision.
+3. Partition limits are included in `plan_id` only when subdivision is configured, preserving unsplit `0.5.0a1` identity.
+4. Archive units are ordered deterministically and use zero-based persistent unit indexes.
+5. The logical stream is the cleanup transaction group: all units commit and verify before any source cleanup.
+6. Manifest format 3 carries unit-group cardinality and identity while supported historical manifests remain verifiable.
+7. ZIP representation, a hard final-container-size mechanism, durable human sequence allocation, and storage-backend plugins remain outside this candidate.
