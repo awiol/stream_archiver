@@ -134,7 +134,7 @@ Compression can add its documented suffix/disambiguation, but the source-relativ
 path is otherwise retained. This avoids filename collisions and preserves useful
 provenance.
 
-There is no flatten-output mode in the current 0.4 line.
+There is no flatten-output mode in the current product line.
 
 ## 6. Policy fields
 
@@ -493,7 +493,7 @@ source tree's declared package version.
 
 ### Does Stream Archiver scan subdirectories?
 
-Yes for schema 1/2 and for schema 3/4 with `recursive = true`. Use
+Yes for schema 1/2 and for schema 3 or newer with `recursive = true`. Use
 `recursive = false` for top-level-only discovery.
 
 ### Can one stream span multiple directories?

@@ -24,7 +24,7 @@ Options:
   --service-log-level LEVEL  DEBUG, INFO, WARNING, ERROR, or CRITICAL
                              (default: INFO).
   --service-log-format NAME  text or json (default: text).
-  --python-version VERSION   uv-managed Python version (default: 3.11).
+  --python-version VERSION   uv-managed Python version (default: 3.11; supported: 3.11–3.13).
   --replace-config           Replace an existing installed policy file.
   --help                     Show this help.
 
@@ -113,6 +113,16 @@ while (($#)); do
             ;;
     esac
 done
+
+case "$PYTHON_VERSION" in
+    3.11|3.11.*|3.12|3.12.*|3.13|3.13.*)
+        ;;
+    *)
+        printf 'stream-archiver supports Python 3.11, 3.12, and 3.13; got %s.\n' \
+            "$PYTHON_VERSION" >&2
+        exit 2
+        ;;
+esac
 
 if [[ $EUID -ne 0 ]]; then
     printf 'Run this installer as root, for example with sudo.\n' >&2

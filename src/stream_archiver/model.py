@@ -88,7 +88,7 @@ class PlannedAction:
 
 @dataclass(frozen=True, slots=True)
 class ArchivePlan:
-    """A deterministic, collision-free plan for one source stream.
+    """A deterministic, collision-free plan for one archive unit of a logical stream.
 
     Each plan owns exactly one source root. Files discovered under different
     source roots can never be placed in the same final archive directory.

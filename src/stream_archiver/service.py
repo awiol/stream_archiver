@@ -30,6 +30,7 @@ from stream_archiver.executor import (
     MANIFEST_NAME,
     ArchiveExecutionResult,
     ArchiveVerificationResult,
+    _read_json,
     _verify_archive_unlocked,
     complete_committed_plans,
     deferred_archive_unit_plan_ids,
@@ -366,7 +367,7 @@ def _run_policies_at(
                 _log_capacity_precheck(
                     before,
                     decision_reason=decision.reason if decision.warn else None,
-                    current_stream_source_bytes=unit_source_bytes,
+                    current_stream_source_bytes=stream_source_bytes,
                     remaining_source_bytes=remaining_source_bytes,
                     policy=item.policy.name,
                     archive=plan.archive_name,
@@ -702,6 +703,29 @@ def _verify_policies_locked(
     return tuple(results)
 
 
+def _manifest_owner(path: Path) -> tuple[str, str]:
+    """Return validated policy/source ownership without verifying foreign payloads.
+
+    Policy-scoped verification must distinguish a valid foreign-owned archive from
+    a candidate whose ownership evidence is malformed.  This helper deliberately
+    validates only the ownership evidence needed for that routing decision; full
+    manifest and payload verification remains reserved for selected archives.
+    """
+
+    manifest = _read_json(path, RecoveryError, "archive manifest")
+    if not isinstance(manifest, dict):
+        raise RecoveryError(f"archive manifest must be an object: {path}")
+    policy_name = manifest.get("policy_name")
+    source_root = manifest.get("source_root")
+    if not isinstance(policy_name, str) or not policy_name:
+        raise RecoveryError(f"invalid policy_name in archive manifest {path}")
+    if not isinstance(source_root, str) or not source_root:
+        raise RecoveryError(f"invalid source_root in archive manifest {path}")
+    if not Path(source_root).is_absolute():
+        raise RecoveryError(f"source_root must be absolute in archive manifest {path}")
+    return policy_name, source_root
+
+
 def verify_destination(
     destination: Path,
     *,
@@ -752,13 +776,7 @@ def _verify_destination_locked(
                 raise RecoveryError(f"archive-shaped directory is missing {MANIFEST_NAME}: {child}")
             continue
         if owners is not None:
-            import json
-
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RecoveryError(f"cannot read archive manifest {manifest_path}: {exc}") from exc
-            owner = (manifest.get("policy_name"), manifest.get("source_root"))
+            owner = _manifest_owner(manifest_path)
             if owner not in owners:
                 continue
         candidates.append(child)

@@ -38,9 +38,9 @@ _SPAN_DIRECTIVES = frozenset({"D", "H", "M", "S", "f", "N"})
 def archive_unit_id(plan_id: str, *, unit_index: int = 0) -> str:
     """Return the full format-neutral identity for one archive unit.
 
-    ``unit_index`` is zero for the current one-unit-per-logical-stream model. It
-    is part of the identity contract now so later deterministic subdivision can
-    distinguish units without using invocation-local stream ordinals.
+    ``unit_index`` is the deterministic zero-based position of this archive unit
+    within its logical stream. It is part of persistent identity and is never an
+    invocation-local stream ordinal.
     """
 
     if not _is_sha256(plan_id):

@@ -13,7 +13,9 @@ including local-filesystem and producer-quiescence preconditions.
 ## Quick start
 
 Requirements: Linux and Python 3.11–3.13. `uv` is the recommended environment
-and installer tool.
+manager. Package metadata rejects Python 3.14+ for the 0.5 release line; this is a
+support boundary, not evidence that newer Python necessarily fails. `uv` remains the
+recommended environment and installer tool.
 
 ```bash
 cp examples/config/policies.toml ~/stream-archiver-policies.toml
@@ -228,8 +230,9 @@ sudo UV_BIN="$(command -v uv)" \
   --config /absolute/path/to/policies.toml
 ```
 
-The installer defaults to Python 3.11. It refuses to install a wheel whose
-version does not match the source tree's declared project version. It validates
+The installer defaults to Python 3.11 and accepts only Python 3.11–3.13 selectors.
+It refuses to install a wheel whose version does not match the source tree's
+declared project version. It validates
 configuration and planning, generates and verifies deployment-specific units,
 and reloads systemd. It does **not** start archival movement or enable the timer.
 
@@ -244,9 +247,10 @@ Generated units use `ProtectHome=read-only`, `ProtectSystem=strict`, and explici
 ./tools/verify-local.sh --release
 ```
 
-The release route builds and installs the wheel outside the source checkout and
-runs the package/CLI verification surface. See `docs/verification.md` for the
-exact evidence contract.
+The release route first verifies the self-contained source distribution, then
+builds the wheel from that sdist, installs it outside the source checkout, and
+runs the package/CLI/systemd verification surfaces without repository-only test
+support. See `docs/verification.md` for the exact evidence contract.
 
 ## Documentation map
 

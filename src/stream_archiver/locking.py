@@ -126,12 +126,12 @@ def resource_locks(
 def execution_lock(path: Path) -> Iterator[None]:
     """Provide the deprecated 0.3 lock-file API without making it authoritative.
 
-    New CLI execution uses :func:`resource_locks`.  This compatibility helper is
-    retained for third-party callers during the 0.4 alpha migration only.
+    New CLI execution uses :func:`resource_locks`. This compatibility helper is
+    retained only for legacy callers while the lock-file API remains deprecated.
     """
 
     warnings.warn(
-        "execution_lock(path) is deprecated; lock-file paths do not define the 0.4 safety domain",
+        "execution_lock(path) is deprecated; lock-file paths do not define the current safety domain",
         DeprecationWarning,
         stacklevel=2,
     )

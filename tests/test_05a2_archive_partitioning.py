@@ -11,7 +11,12 @@ import pytest
 from stream_archiver import service
 from stream_archiver.config import Policy, SymlinkRule, load_config
 from stream_archiver.errors import ConfigurationError, ExecutionError, RecoveryError
-from stream_archiver.executor import MANIFEST_NAME, SUCCESS_NAME
+from stream_archiver.executor import (
+    MANIFEST_NAME,
+    SUCCESS_NAME,
+    execute_plan,
+    recover_pending_archives,
+)
 from stream_archiver.model import ActionKind
 from stream_archiver.reporting import build_run_report
 from stream_archiver.service import _run_policy_at, plan_policy
@@ -191,6 +196,36 @@ def test_commit_phase_interruption_preserves_all_sources_and_rerun_reuses_identi
     assert not first_source.exists()
     assert not second_source.exists()
     assert all((archive.archive_directory / SUCCESS_NAME).is_file() for archive in result.archives)
+
+
+def test_restart_recovery_prevalidates_complete_group_before_first_unlink(tmp_path: Path) -> None:
+    """R-PART-011: a later-unit mismatch leaves earlier-unit sources untouched."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    destination.mkdir()
+    old = NOW - timedelta(days=40)
+    first_source = write_at(source / "a.bin", b"a", old)
+    second_source = write_at(source / "b.bin", b"b", old + timedelta(seconds=1))
+    plans = plan_policy(_policy(source, destination, max_files=1), now=NOW).archive_plans
+
+    for plan in plans:
+        execute_plan(plan, defer_cleanup=True)
+
+    write_at(second_source, b"changed", old + timedelta(seconds=2))
+
+    with pytest.raises(RecoveryError, match="source changed"):
+        recover_pending_archives(destination, source)
+
+    assert first_source.is_file()
+    assert second_source.is_file()
+    assert all(
+        json.loads((plan.final_directory / MANIFEST_NAME).read_text(encoding="utf-8"))[
+            "cleanup_complete"
+        ]
+        is False
+        for plan in plans
+    )
 
 
 def _policy(

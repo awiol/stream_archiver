@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0b3 — 2026-10-01
+
+- Integrate the beta2 review closures while preserving the committed 0.4 release history and repository-local ignore rules.
+- Apply required Ruff normalization to the integrated beta source and verification tooling.
+
+## 0.5.0b2 — 2026-09-30
+
+- fix policy-scoped verification so malformed or ambiguous ownership evidence fails
+  closed instead of being silently skipped as foreign-owned;
+- preserve logical-stream byte semantics in capacity telemetry when one stream is
+  subdivided into multiple archive units;
+- make Python 3.11–3.13 the enforceable support range across Core Metadata, public
+  documentation, classifiers, and the system installer; and
+- add predecessor-sensitive regressions for all three isolated-review findings.
+
+## 0.5.0b1 — 2026-09-30
+
+- Promoted the reviewed 0.5 feature set to its first beta candidate after a package-wide Deep Consistency Review and review-bundle closure pass.
+- Made the Python sdist a self-contained source-user/review artifact by including normative docs, changelog, examples, maintainer tools, complete pytest support, and the lockfile while excluding repository-local `local/`.
+- Added a clean-sdist release gate that runs the complete shipped suite, builds the wheel from the sdist, reruns tests against the installed wheel, and verifies CLI/systemd surfaces without repository-only support files.
+- Removed stale tracked `PKG-INFO`; generated metadata is now checked dynamically against the project version together with runtime, lockfile, requirements/design, and changelog identities.
+- Replaced multiprocessing/subprocess-dependent locking regressions with a deterministic Linux `flock` oracle using independent open file descriptions, removing process startup, import-mode, queue, and teardown timing from release evidence.
+- Fixed manifest-format-3 restart recovery to validate all pending archive-unit sources in a complete logical-stream group before the first unlink, while retaining per-unit revalidation immediately before cleanup.
+- Removed duplicate requirement identifiers by assigning the configurable archive-name contract its own `R-ANAME-*` namespace and reconciled current schema-5/configuration terminology.
+- Kept ZIP representation, hard final-container size, durable human sequence allocation, and storage-backend plugins deferred.
+
 ## 0.5.0a3 — 2026-10-01
 
 - Applied behavior-preserving Ruff lint normalization to report text and restored the Python systemd verifier to non-executable mode.

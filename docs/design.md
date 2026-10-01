@@ -1,14 +1,14 @@
 # Stream Archiver Design
 
-**Document version:** `0.5.0-alpha.2`
-**Target package development version:** `0.5.0a2`
-**Date:** 2026-09-29
-**Status:** implementation design for the second 0.5 alpha candidate
-**Requirements baseline:** `docs/requirements.md`, document version `0.5.0-alpha.2`
+**Document version:** `0.5.0-beta.3`
+**Target package development version:** `0.5.0b3`
+**Date:** 2026-10-01
+**Status:** implementation design for the first 0.5 beta candidate
+**Requirements baseline:** `docs/requirements.md`, document version `0.5.0-beta.3`
 
 ## 1. Design objective
 
-The 0.4 design repaired transaction and behavioral contracts while preserving the high-level architecture. The 0.5.0a1 design changes the persistent archive namespace by separating a format-neutral archive-unit identity from a configurable human archive name. It preserves the directory representation, transaction safety, reporting, and cleanup/recovery ordering.
+The 0.4 design repaired transaction and behavioral contracts while preserving the high-level architecture. The 0.5 line separates format-neutral archive-unit identity from configurable human archive names and adds deterministic subdivision of one logical stream into archive units. The current beta preserves the directory representation, transaction safety, reporting, and cleanup/recovery ordering while closing review and source-distribution defects.
 
 The design retains:
 
@@ -677,19 +677,32 @@ Prefer precise descriptions of the mechanism and its verified boundary.
 
 | Requirement family | Primary design section |
 |---|---|
+| R-SCOPE | §1 Design objective; §2 Primary invariants; §7.1 Supported durability claim |
+| R-CONFIG | §3 Revised planning model; §20.1 Configuration schema 3; §23.5 and §24.1 schema-4/5 boundaries |
+| R-DISC | §3.1 Discovery output; §3.3 Boundary entries |
 | R-STREAM / R-SYM | §3 Revised planning model |
 | R-NAME | §4 Archive plan and naming |
+| R-MOVE | §14 Logical move metadata contract |
 | R-SAFE | §5 Transaction state machine; §6 Cleanup recovery |
 | R-DUR | §7 Durability design |
-| R-TIME | §8 Time model |
+| R-EVID | §5 Transaction state machine; §9 Verification model |
 | R-VERIFY | §9 Verification model |
-| R-CONC | §10 Concurrency model |
+| R-TIME | §8 Time model |
 | R-SCHED | §11 Scheduling-state model |
-| R-LOG | §12 Logging and progress design |
-| R-SYSTEMD | §13 systemd design |
-| R-MOVE | §14 Logical move metadata contract |
-| R-DOC | §15 Documentation architecture |
+| R-CONC | §10 Concurrency model |
+| R-COMPAT | §§6, 9–13; §18 retained compatibility decisions; §22.8 output migration |
+| R-PLAN | §20.3 Planning presentation boundary; §21.5 capacity observation |
+| R-LOG | §12 Logging and progress design; §21.3 work-triggered progress |
+| R-SYSTEMD | §13 systemd design; §20.7 safe generated deployment files |
+| R-INSTALL | §13.4 Installation gate |
+| R-API | §8.2 Execution observation time; §10 concurrency model; §20.5 public lock ownership |
+| R-DOC | §15 Documentation architecture; this traceability section |
 | R-PROG / R-CAP | §21 Runtime accounting and capacity design |
+| R-REPORT | §22 Final reporting design |
+| R-ANAME | §23 Archive-unit identity and configurable naming design |
+| R-PART | §24 Archive-unit subdivision design; §25.4 pending group recovery |
+| R-DIST / R-REL / R-TEST | §25 Review-closure and source-distribution design; §26.4 beta.2 closure |
+| R-PY | §26.3 Supported Python policy |
 
 ## 17. Retained 0.4.0a1 implementation sequence
 
@@ -907,10 +920,10 @@ transformation evidence without retaining another per-file object after the
 archive plan already owns per-file source metadata. Report-state memory therefore
 scales with distinct suffix/action groups rather than selected file count.
 
-For current manifest format 2, finalized byte counts come directly from validated
-`archive_size` records created during staging. Legacy manifest format 1 predates
-that field; when a supported legacy archive is reconciled, the already verified
-final payload file supplies the size before it is folded into the group.
+For supported manifest formats 2 and 3, finalized byte counts come directly from
+validated `archive_size` records created during staging. Legacy manifest format 1
+predates that field; when a supported legacy archive is reconciled, the already
+verified final payload file supplies the size before it is folded into the group.
 Reporting therefore does not revisit deleted source files.
 
 ### 22.3 Invocation aggregation
@@ -1037,7 +1050,9 @@ not treating its absence from the sdist as a deletion instruction.
 
 `plan_id` remains the deterministic logical archive-plan digest over policy,
 source/destination roots, selected entries, actions, identities, and selection
-bounds. `ArchivePlan.archive_unit_index` is introduced with current value zero.
+bounds. `ArchivePlan.archive_unit_index` was introduced in `0.5.0a1` with value
+zero for its one-unit streams. `0.5.0a2` extends that field to the deterministic
+zero-based range of a subdivided logical stream.
 
 The full archive-unit identity is:
 
@@ -1049,10 +1064,9 @@ SHA256(canonical JSON {
 })
 ```
 
-This keeps identity independent of archive representation and human name while
-reserving a deterministic dimension for `0.5.0a2` subdivision. The future
-subdivision design must decide unit ordering and action allocation before indexes
-above zero become valid. Invocation progress indexes are unrelated.
+This keeps identity independent of archive representation and human name. The
+`0.5.0a2` subdivision design below defines stable action ordering and unit allocation
+before indexes above zero are assigned. Invocation progress indexes are unrelated.
 
 ### 23.3 Persistent archive name
 
@@ -1118,15 +1132,16 @@ a syntactically valid current `--sa-<20 hex>` suffix. This permits arbitrary
 human templates while retaining malformed-archive detection.
 
 For current-format names, manifest validation recomputes the expected suffix from
-`plan_id` and unit index zero. Renaming a current archive while changing only the
-manifest's `archive_name` therefore cannot detach visible identity from the
-original plan. Historical names do not receive this new suffix check.
+`plan_id` and the manifest's validated deterministic unit index. Renaming a current
+archive while changing only the manifest's `archive_name` therefore cannot detach
+visible identity from the original plan/unit. Historical names do not receive this
+new suffix check.
 
 ### 23.8 Deferred boundaries
 
 No new storage protocol is introduced. The archive unit is still represented by
 a local directory and uses the same staging, atomic commit, fsync, verification,
-source-revalidation, cleanup, and recovery mechanisms. `0.5.0a2` can build
+source-revalidation, cleanup, and recovery mechanisms. `0.5.0a2` builds generic
 subdivision on `archive_unit_index`; ZIP remains a later representation; durable
 human sequence allocation and non-filesystem destination backends remain
 separate decisions.
@@ -1214,3 +1229,91 @@ or future ZIP overhead. `0.5.0a2` keeps the directory representation and local
 filesystem durability model. ZIP and any representation-specific hard maximum
 container size remain future design work; a destination storage protocol remains
 deferred until a concrete second backend justifies an extension contract.
+
+
+## 25. 0.5.0b1 review-closure and source-distribution design
+
+### 25.1 Distribution boundary
+
+The wheel remains the runtime artifact. The sdist is also a supported source-user,
+review, and verification artifact because README explicitly routes users and
+maintainers to in-tree examples, tools, tests, and normative documents.
+`MANIFEST.in` therefore owns the non-runtime source-distribution inclusion policy.
+It includes the maintained documentation, changelog, examples, tools, tests/support
+modules, lockfile, and `.gitignore`, while `local/` remains repository-local.
+
+Generated root `PKG-INFO` is not maintained repository source. Setuptools generates
+current metadata while building the sdist. Release verification checks any generated
+metadata against the project version instead of keeping a copied `PKG-INFO` that can
+drift.
+
+### 25.2 Release identity oracle
+
+`pyproject.toml` is the package-version authority for a candidate. Release tests
+derive that value and compare runtime `__version__`, the lockfile's local package
+record, requirements/design target identity, leading changelog identity, and built
+sdist metadata. Candidate-specific literals are not used as expected test values.
+This lets the same tests survive prerelease advancement while still detecting stale
+release-bound artifacts.
+
+### 25.3 Locking-test oracle
+
+The hierarchical locking regressions use two independently opened lock sets in one
+Python process. On Linux, `flock` conflict/compatibility is associated with open file
+descriptions, so this directly exercises the kernel relation that cooperating
+processes rely on without adding process startup, pytest import-mode, queue, or
+interpreter-teardown behavior to the regression oracle. A bounded installed-artifact
+process smoke can supplement this check when useful, but process lifecycle is not a
+release-dependent pass/fail condition for the lock semantics themselves.
+
+### 25.4 Pending group recovery
+
+Normal multi-unit execution already commits every unit before group cleanup. Restart
+recovery now mirrors that group boundary: after confirming that all expected units
+exist, it verifies every pending archive and validates every remaining selected source
+for every pending unit before calling any per-unit recovery cleanup. Per-unit recovery
+then revalidates its own sources immediately before unlink, preserving the existing
+source-race fail-closed check.
+
+### 25.5 Beta review boundary
+
+The beta transition is a review/closure candidate, not a new feature tranche. It
+closes source-distribution completeness, release-identity drift, requirement-ID
+ambiguity, lock-test evidence instability, current-schema documentation drift, and
+group-recovery prevalidation. ZIP representation, final-container hard size limits,
+durable human numbering, and storage-backend plugins remain deferred.
+
+
+## 26. 0.5.0b2 isolated-review closure design
+
+### 26.1 Policy-scoped ownership routing
+
+Policy-scoped verification separates ownership routing from full archive verification.
+Before an archive candidate can be skipped as foreign-owned, `_manifest_owner()` reads
+the manifest through the same regular-file/symlink-safe JSON boundary used by archive
+verification and validates only the two fields necessary to establish ownership:
+`policy_name` and absolute `source_root`. This avoids payload work for valid foreign
+archives while making ambiguous ownership fail closed. Selected archives still pass
+through the complete manifest, payload, checksum, and completion-evidence verifier.
+
+### 26.2 Capacity field semantics under subdivision
+
+The service computes one `stream_source_bytes` value for the logical stream group
+before iterating its archive units. Every unit's destination-capacity precheck receives
+that group value for `current_stream_source_bytes`; `remaining_source_bytes` retains
+its existing destination-wide decreasing-work meaning. No new telemetry field or
+schema is required.
+
+### 26.3 Supported Python policy
+
+The 0.5 release line uses a closed supported-minor policy: Python 3.11, 3.12, and
+3.13. `pyproject.toml` therefore declares `>=3.11,<3.14`, the existing classifiers
+name those three minors, and `install-systemd.sh` rejects other minor selectors before
+root/system mutation. Patch selectors such as `3.13.7` remain valid because they are
+within a supported minor. This is a support/evidence boundary, not a claim that 3.14
+would necessarily fail at runtime.
+
+### 26.4 Candidate scope
+
+`0.5.0b2` is a review-closure candidate only. It does not add ZIP representation,
+new subdivision policy, storage backends, or durable human sequence allocation.

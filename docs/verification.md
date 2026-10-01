@@ -32,8 +32,9 @@ This runs `uv sync --frozen --extra dev`. Add `--offline` only when all required
 artifacts are cached. Network/cache failure is an environment result, not a
 product test failure.
 
-The project declares Python 3.11, 3.12, and 3.13. Test every claimed version for
-a release when those interpreters are available.
+The project declares Python 3.11, 3.12, and 3.13, and package metadata enforces
+`>=3.11,<3.14`. Test every claimed version for a release when those interpreters are
+available.
 
 ## Source verification
 
@@ -98,22 +99,32 @@ minimum retain tests for:
 - alias cleanup follows the archive unit containing its target;
 - manifest-format-3 unit identity/index/count are reconciled against the selected plan;
 - interruption after an earlier unit commit but before a later unit commit leaves all logical-stream sources intact; and
-- rerun after that interruption reuses deterministic unit identities and completes the group before cleanup; and
-- changing partition identity while such a group is incomplete stops before new mutation or cleanup.
+- rerun after that interruption reuses deterministic unit identities and completes the group before cleanup;
+- changing partition identity while such a group is incomplete stops before new mutation or cleanup;
+- restart recovery of a complete pending archive-unit group validates every remaining selected source across the group before the first unlink, so a later-unit mismatch cannot partially clean an earlier unit;
+- malformed current-format `plan_id` metadata fails through the typed recovery/verification error contract rather than leaking a raw identity-helper exception;
+- maintained requirement identifiers remain unique and every requirement family remains routed by the design traceability table; and
+- hierarchical lock conflict/compatibility regressions use deterministic independent-open-file-description evidence without process-startup, queue, import-mode, or teardown timing as the oracle.
 
 Where practical, execute the discriminating regression against the exact prior
 baseline and record that it fails in the expected way.
 
-## Installed-artifact verification
+## Clean-sdist and installed-artifact verification
 
 ```bash
 ./tools/verify-local.sh --release
 ```
 
-The release route builds a wheel without dependency resolution, installs it into
-an isolated target directory, copies the tests outside the source checkout, runs
-them with imports resolved from the installed package, and smoke-tests
-`python -m stream_archiver --help`.
+The release route first builds and unpacks the Python source distribution. It
+requires the normative docs, changelog, examples, maintainer tools, complete test
+support graph, lockfile, and manifest policy to be present in that artifact, and
+requires repository-local `local/` state to be absent. It then runs the complete
+pytest suite and generated-systemd check from the unpacked sdist.
+
+The route builds the wheel **from that sdist**, installs it into an isolated target
+directory, reruns the sdist-shipped tests with imports resolved from the installed
+package, verifies generated systemd output again, and smoke-tests
+`python -m stream_archiver --help`. Repository-only files cannot satisfy this gate.
 
 ## Installer and systemd verification
 
@@ -132,7 +143,7 @@ check through `tools/verify-systemd.py` when `systemd-analyze` is installed.
 
 Also verify that `render-systemd --force` replaces an output symlink itself and does not overwrite its target, and that the installer fails when no wheel matches the exact project version.
 
-Assert that generated 0.4 services:
+Assert that current generated services:
 
 - do not contain operational `ConditionPath...` gates;
 - do not pass `--lock-file`;
@@ -141,13 +152,15 @@ Assert that generated 0.4 services:
 
 ## Compatibility verification
 
-For the 0.4 line, preserve executable evidence that:
+Preserve executable compatibility evidence that:
 
 - completed supported 0.3 and previous 0.4-alpha archives remain verifiable;
 - pending supported 0.3 archives enter corrected verify-before-delete recovery;
 - valid v1 scheduling state is readable and conservatively due;
 - schema-1/2 configurations retain recursive/source-root historical defaults;
-- schema-3 configurations expose the new discovery/partition controls; and
+- schema-3 configurations expose the discovery/partition controls;
+- schema-4 configurations add stable-suffix configurable archive names while historical names remain discoverable;
+- schema-5 configurations add deterministic archive-unit subdivision without redefining the logical stream; and
 - upgraded systemd deployments require regenerated units.
 
 For the human plan surface, verify representative summary arithmetic and inspect line density as a usability signal. The approximate 40-line summary target and 1–10 second INFO-density preference are not correctness gates.
@@ -156,19 +169,36 @@ For the human plan surface, verify representative summary arithmetic and inspect
 
 Before handoff:
 
-1. build the complete source archive from the final repository tree, excluding
-   VCS internals/caches/build products/release evidence;
-2. extract and inspect it in a clean directory;
-3. generate a binary-capable full-index patch from the exact stated baseline;
-4. replay that patch on a clean exact baseline;
-5. compare replay and target source trees byte-for-byte and by relevant modes;
-6. run source and installed-package checks on the final target;
-7. record unavailable gates and limitations explicitly;
-8. write the delivery manifest; and
-9. compute final SHA-256 values after every artifact is final.
+1. run `./tools/verify-local.sh --release` so the Python sdist, sdist-only test
+   graph, wheel-from-sdist, installed package, CLI, and systemd surfaces are checked;
+2. confirm current release identity across build/runtime/docs/lock/changelog and the
+   generated sdist `PKG-INFO`;
+3. build the complete source archive from the final repository tree, excluding
+   VCS internals/caches/build products/release evidence and repository-local `local/`;
+4. extract and inspect it in a clean directory;
+5. generate a binary-capable full-index patch from the exact stated baseline;
+6. replay that patch on a clean exact baseline;
+7. compare replay and target source trees byte-for-byte and by relevant modes;
+8. record unavailable gates and limitations explicitly;
+9. write the delivery manifest; and
+10. compute final SHA-256 values after every artifact is final.
 
 ## Claim limits
 
 Coverage is an omission signal, not proof of safety. Fault injection verifies
 specified intermediate-state behavior but does not simulate every real
 power-loss/storage-controller failure. Self-review is not independent review.
+
+
+## 0.5.0b2 review-closure checks
+
+The maintained release suite must retain focused checks that:
+
+- policy-scoped verification rejects malformed, missing, wrongly typed, unreadable,
+  or symlinked ownership evidence while still skipping a valid foreign owner before
+  payload verification;
+- a subdivided logical stream reports full logical-stream bytes in
+  `current_stream_source_bytes` for every archive-unit precheck and separately reports
+  decreasing `remaining_source_bytes`; and
+- `requires-python`, Python classifiers, README/verification support wording, and the
+  installer all encode the same Python 3.11–3.13 support policy.

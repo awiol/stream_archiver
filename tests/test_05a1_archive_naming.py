@@ -214,6 +214,29 @@ def test_current_archive_name_suffix_is_verified_against_manifest_plan_id(tmp_pa
         verify_destination(destination)
 
 
+def test_malformed_current_manifest_plan_id_is_a_typed_recovery_failure(tmp_path: Path) -> None:
+    """Malformed current identity metadata stays inside the recovery-error contract."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    destination.mkdir()
+    write_at(source / "data.txt", b"payload", NOW - timedelta(days=40))
+    result = _run_policy_at(
+        _policy(source, destination, archive_name_template="{start:%Y%m%d}"),
+        planning_time=NOW,
+    )
+    archive = result.archives[0].archive_directory
+    manifest_path = archive / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["plan_id"] = "not-a-sha256"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(RecoveryError, match="invalid plan_id"):
+        verify_destination(destination)
+
+
 def test_current_archive_shaped_directory_without_manifest_is_not_ignored(tmp_path: Path) -> None:
     """Destination audit recognizes configurable-name archives by their stable suffix shape."""
 
@@ -226,7 +249,7 @@ def test_current_archive_shaped_directory_without_manifest_is_not_ignored(tmp_pa
 
 
 def test_machine_plan_exposes_archive_unit_identity_separately_from_name(tmp_path: Path) -> None:
-    """R-NAME-008: JSON-plan data carries full identity and deterministic unit index."""
+    """R-ANAME-008: JSON-plan data carries full identity and deterministic unit index."""
 
     source = tmp_path / "source"
     destination = tmp_path / "archive"
@@ -247,7 +270,7 @@ def test_machine_plan_exposes_archive_unit_identity_separately_from_name(tmp_pat
 def test_planning_rejects_rendered_name_over_destination_name_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R-NAME-004: destination filename limits are checked before execution."""
+    """R-ANAME-004: destination filename limits are checked before execution."""
 
     source = tmp_path / "source"
     destination = tmp_path / "archive"

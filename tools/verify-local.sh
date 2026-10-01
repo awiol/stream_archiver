@@ -13,9 +13,9 @@ Usage: ./tools/verify-local.sh [--release] [--python PATH]
 
 source (default): compile, test the src-layout checkout, run Ruff when present,
                   check shell syntax and Git whitespace.
---release:         additionally build a wheel, install it outside the checkout,
-                  run the test suite against that installed package, and smoke
-                  test the installed CLI.
+--release:         additionally build and unpack the sdist, run the complete
+                  suite from that artifact, build/install its wheel, rerun the
+                  suite against the installed package, and smoke-test the CLI.
 
 The script does not download dependencies. Use tools/bootstrap-dev.sh first when
 the required test/lint tools are not already available.
@@ -81,36 +81,108 @@ if [[ "$MODE" != release ]]; then
 fi
 
 cleanup_release_workspace() {
-  rm -rf .verification-dist .verification-install .verification-tests
+  rm -rf .verification-dist .verification-install .verification-sdist
 }
 trap cleanup_release_workspace EXIT
 
-rm -rf .verification-dist .verification-install .verification-tests
-mkdir -p \
-  .verification-dist \
-  .verification-install \
-  .verification-tests/tests \
-  .verification-tests/tools \
-  .verification-tests/examples/config
-"$PYTHON" -m pip wheel . --no-deps --no-build-isolation --wheel-dir .verification-dist
+UV_BIN=${UV_BIN:-$(command -v uv || true)}
+if [[ -z "$UV_BIN" ]]; then
+  printf 'uv is required for the clean-sdist release gate. Set UV_BIN or install uv.\n' >&2
+  exit 2
+fi
+
+rm -rf .verification-dist .verification-install .verification-sdist
+mkdir -p .verification-dist .verification-install .verification-sdist
+
+# Build the supported source-user artifact without resolving/downloading build
+# dependencies. The active verification environment must already contain the
+# declared build backend.
+"$UV_BIN" build \
+  --sdist \
+  --no-build-isolation \
+  --offline \
+  --out-dir .verification-dist \
+  .
+sdist=$(
+  find .verification-dist -maxdepth 1 -type f -name 'stream_archiver-*.tar.gz' -print \
+    | sort \
+    | tail -n 1
+)
+if [[ -z "$sdist" ]]; then
+  printf 'No stream_archiver source distribution was built.\n' >&2
+  exit 2
+fi
+
+tar -xzf "$sdist" -C .verification-sdist
+sdist_root=$(
+  find .verification-sdist -mindepth 1 -maxdepth 1 -type d -name 'stream_archiver-*' -print \
+    | sort \
+    | tail -n 1
+)
+if [[ -z "$sdist_root" ]]; then
+  printf 'Could not locate extracted stream_archiver sdist root.\n' >&2
+  exit 2
+fi
+
+required_sdist_paths=(
+  CHANGELOG.md
+  uv.lock
+  MANIFEST.in
+  docs/requirements.md
+  docs/design.md
+  docs/verification.md
+  docs/operations.md
+  docs/user-guide.md
+  examples/config/policies.toml
+  tools/bootstrap-dev.sh
+  tools/install-systemd.sh
+  tools/verify-local.sh
+  tools/verify-systemd.py
+  tests/__init__.py
+  tests/helpers.py
+)
+for relative in "${required_sdist_paths[@]}"; do
+  if [[ ! -f "$sdist_root/$relative" ]]; then
+    printf 'Required source-distribution path is missing: %s\n' "$relative" >&2
+    exit 2
+  fi
+done
+if [[ -e "$sdist_root/local" || -L "$sdist_root/local" ]]; then
+  printf 'Repository-local local/ unexpectedly entered the source distribution.\n' >&2
+  exit 2
+fi
+
+# Run the official test configuration using only files shipped by the sdist.
+(
+  cd "$sdist_root"
+  PYTHONPATH=.:src "$PYTHON" -m pytest -q
+  bash -n tools/install-systemd.sh tools/bootstrap-dev.sh tools/verify-local.sh
+  PYTHONPATH=src "$PYTHON" tools/verify-systemd.py
+)
+
+# Build the runtime artifact from the sdist, not from the repository checkout.
+"$PYTHON" -m pip wheel \
+  "$sdist" \
+  --no-deps \
+  --no-build-isolation \
+  --wheel-dir .verification-dist
 wheel=$(
   find .verification-dist -maxdepth 1 -type f -name 'stream_archiver-*.whl' -print \
     | sort \
     | tail -n 1
 )
 if [[ -z "$wheel" ]]; then
-  printf 'No stream_archiver wheel was built.\n' >&2
+  printf 'No stream_archiver wheel was built from the source distribution.\n' >&2
   exit 2
 fi
 "$PYTHON" -m pip install --no-deps --no-compile --target .verification-install "$wheel"
-cp -a tests/. .verification-tests/tests/
-cp pyproject.toml .verification-tests/pyproject.toml
-cp examples/config/policies.toml .verification-tests/examples/config/policies.toml
-cp tools/install-systemd.sh .verification-tests/tools/install-systemd.sh
+
+# The tests and their source-user fixtures come from the extracted sdist while
+# imports resolve only from the installed wheel target.
 (
-  cd .verification-tests
+  cd "$sdist_root"
   PYTHONPATH="$ROOT/.verification-install" "$PYTHON" -m pytest -q tests
+  PYTHONPATH="$ROOT/.verification-install" "$PYTHON" tools/verify-systemd.py
 )
 PYTHONPATH="$ROOT/.verification-install" "$PYTHON" -m stream_archiver --help >/dev/null
-PYTHONPATH=src "$PYTHON" tools/verify-systemd.py
-printf 'Installed-artifact verification passed: %s\n' "$wheel"
+printf 'Clean-sdist and installed-artifact verification passed: %s -> %s\n' "$sdist" "$wheel"

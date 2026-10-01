@@ -1,4 +1,4 @@
-"""Generate disposable systemd units and verify their 0.4 deployment contract."""
+"""Generate disposable systemd units and verify the current deployment contract."""
 
 from __future__ import annotations
 

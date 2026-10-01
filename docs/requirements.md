@@ -1,9 +1,9 @@
 # Stream Archiver Requirements
 
-**Document version:** `0.5.0-alpha.2`
-**Target package development version:** `0.5.0a2`
-**Date:** 2026-09-29
-**Status:** implementation contract for the second 0.5 alpha candidate
+**Document version:** `0.5.0-beta.3`
+**Target package development version:** `0.5.0b3`
+**Date:** 2026-10-01
+**Status:** implementation contract for the first 0.5 beta candidate
 **Repository intent:** repository requirements; supersedes document version 0.4.0-alpha.5
 
 ## 1. Purpose
@@ -60,7 +60,7 @@ A stream is **eligible** when its newest boundary entry is at least `minimum_age
 
 ### 3.9 Archive plan
 
-An **archive plan** is the deterministic mapping from one eligible source-root stream to archive payload actions and cleanup-only actions.
+An **archive plan** is the deterministic mapping from one archive unit of an eligible logical stream to archive payload actions and cleanup-only actions. One logical stream may therefore have one or more archive plans.
 
 ### 3.10 Archive directory
 
@@ -81,16 +81,18 @@ A **run report** is the final invocation-level result for newly selected archiva
 ### 3.14 Archive unit
 
 An **archive unit** is one persistent archive transaction derived from one logical
-stream. In `0.5.0a1`, each logical stream still produces exactly one archive unit.
-The term is introduced before stream subdivision so persistent identity and naming
-do not depend on the directory representation or on invocation-local stream order.
+stream. Schemas 1–4 produce one archive unit per logical stream. Schema 5 may
+subdivide one logical stream into multiple deterministic archive units. Persistent
+identity and naming do not depend on directory representation or invocation-local
+stream order.
 
 ### 3.15 Archive-unit identity
 
 An **archive-unit identity** is a deterministic format-neutral identifier derived
-from the logical archive plan plus a deterministic unit index. The current unit
-index is zero. It must not use `stream_index / stream_total` or another
-invocation-local ordinal as persistent identity.
+from the logical archive plan plus a deterministic zero-based unit index. For a
+multi-unit logical stream, indexes cover the complete range from zero through
+`archive_unit_count - 1`. The identity must not use `stream_index / stream_total`
+or another invocation-local ordinal.
 
 ## 4. Scope and non-goals
 
@@ -118,7 +120,7 @@ Stream Archiver must detect observable source identity or content changes before
 
 ### R-CONFIG-001 — Policy fields
 
-Each policy must define:
+Each effective policy must define:
 
 - a stable policy name;
 - an ordered list of unique source roots;
@@ -127,8 +129,10 @@ Each policy must define:
 - `stream_gap`;
 - one symlink rule;
 - recursive-discovery behavior;
-- one stream-partition mode; and
-- zero or more compression rules.
+- one stream-partition mode;
+- an archive-name policy appropriate to its schema;
+- zero or more compression rules; and
+- for schema 5, optional archive-unit source-byte and regular-file-count targets.
 
 ### R-CONFIG-002 — Multiple sources share policy settings
 
@@ -148,7 +152,7 @@ The system must canonicalize configured roots for overlap, ownership, and lock-d
 
 Schema versions 1 and 2 must remain readable with their historical discovery behavior: recursive traversal and source-root-wide stream partitioning.
 
-Schema version 3 must expose `recursive` and `stream_partition`. A configuration that uses either new field must declare schema version 3 so an older binary fails on the schema version rather than silently assigning different semantics.
+Schema version 3 must expose `recursive` and `stream_partition`. Schema version 4 must additionally expose `archive_name_template` and opt into the current stable-suffix archive namespace. Schema version 5 must additionally expose `archive_unit_max_source_bytes` and `archive_unit_max_regular_files` for deterministic archive-unit subdivision. A configuration that uses a field introduced by a later schema must declare that schema or newer so an older binary fails on the schema version rather than silently assigning different semantics.
 
 ### R-CONFIG-006 — Compression codecs
 
@@ -954,7 +958,7 @@ The first 0.5 alpha changes the persistent archive namespace while preserving th
 existing directory representation, transaction ordering, source selection, and
 cleanup/recovery safety contracts.
 
-### R-NAME-001 — Format-neutral archive-unit identity
+### R-ANAME-001 — Format-neutral archive-unit identity
 
 Each `ArchivePlan` must expose a full deterministic archive-unit identity that is
 distinct from its human archive name. The identity must be domain-separated from
@@ -965,7 +969,7 @@ The archive-unit identity must not depend on invocation-local progress ordinals,
 wall-clock execution time, locale, archive representation, or a human naming
 template.
 
-### R-NAME-002 — Mandatory stable name suffix
+### R-ANAME-002 — Mandatory stable name suffix
 
 A schema-4 archive name must end with `--sa-` followed by the first 20 lowercase
 hexadecimal characters of the archive-unit identity. The human prefix may change
@@ -976,7 +980,7 @@ the normal names distinct unless the truncated cryptographic identities collide.
 An existing final path with mismatching manifest identity remains a hard collision;
 the implementation must not overwrite or merge it.
 
-### R-NAME-003 — Controlled human template
+### R-ANAME-003 — Controlled human template
 
 Configuration schema 4 must support per-policy `archive_name_template`. The
 template may contain literal text and the fields `start`, `end`, and `span`.
@@ -993,7 +997,7 @@ The span formatter must support deterministic days/hours/minutes/seconds and
 explicit opt-in microsecond/nanosecond fields. The human prefix is descriptive;
 precision omitted from it does not weaken the stable archive-unit identity.
 
-### R-NAME-004 — Safe filename grammar and bounds
+### R-ANAME-004 — Safe filename grammar and bounds
 
 The naming template and rendered prefix must reject path separators, NUL, the
 reserved `--sa-` marker, unsupported fields/directives, nested replacement
@@ -1003,7 +1007,7 @@ filesystem's observed `PC_NAME_MAX`; when that query is unavailable, the
 implementation uses the Linux-oriented 255-byte fallback and still relies on
 normal filesystem errors as the final authority.
 
-### R-NAME-005 — Explicit schema migration
+### R-ANAME-005 — Explicit schema migration
 
 Schemas 1–3 must remain readable with their historical archive-name algorithm.
 They must reject `archive_name_template` as an unknown key. Schema 4 must use
@@ -1015,7 +1019,7 @@ Programmatic `Policy` construction must preserve the historical name algorithm
 when `archive_name_template` is `None`; a non-null template explicitly opts into
 the current naming contract.
 
-### R-NAME-006 — Recovery and verification compatibility
+### R-ANAME-006 — Recovery and verification compatibility
 
 Verification and recovery must continue to accept supported historical archive
 directories. Destination-wide verification must also recognize current
@@ -1024,21 +1028,21 @@ prefix is arbitrary. A current-format archive name must be rejected when its
 identity suffix does not match the manifest `plan_id` under the current
 archive-unit identity derivation.
 
-### R-NAME-007 — Scheduling fingerprint
+### R-ANAME-007 — Scheduling fingerprint
 
 The policy fingerprint used by `run-if-due` must include the effective archive
 name template. Changing persistent naming policy therefore makes a previously
 successful policy conservatively due once, and the new fingerprint is stored
 only after successful completion.
 
-### R-NAME-008 — Machine plan observability
+### R-ANAME-008 — Machine plan observability
 
 The complete JSON planning surface must expose `archive_unit_id` and
 `archive_unit_index` separately from `archive_name` and `plan_id`. The human
 archive name remains presentation/persistent namespace; the full identity remains
 machine-readable.
 
-### R-NAME-009 — Scope boundary
+### R-ANAME-009 — Scope boundary
 
 `0.5.0a1` must not subdivide a logical stream, create ZIP archives, add a durable
 human sequence allocator, or introduce a destination-storage plugin contract.
@@ -1156,3 +1160,102 @@ inferred from this requirement.
 5. The logical stream is the cleanup transaction group: all units commit and verify before any source cleanup.
 6. Manifest format 3 carries unit-group cardinality and identity while supported historical manifests remain verifiable.
 7. ZIP representation, a hard final-container-size mechanism, durable human sequence allocation, and storage-backend plugins remain outside this candidate.
+
+
+## 31. 0.5.0 beta distribution, recovery, and release-consistency contract
+
+### R-DIST-001 — Reviewable source distribution
+
+The Python source distribution must contain the maintained normative requirements,
+design, verification, operations and user documentation, `CHANGELOG.md`, canonical
+examples, maintainer tools referenced by README, the maintained pytest modules and
+their support modules, and the lockfile used by the documented development route.
+Repository-local `local/` state must not be included.
+
+### R-DIST-002 — Clean-sdist release verification
+
+Release verification must build the source distribution, unpack it outside the
+repository, and verify from that unpacked artifact that: the declared source-user
+paths exist; the complete pytest suite collects and passes under the shipped pytest
+configuration; a wheel can be built and installed from the sdist; the installed CLI
+smoke check passes; and the documented systemd verification helper remains usable.
+Repository-only files must not be used to satisfy this gate.
+
+### R-REL-001 — One current release identity
+
+The current package version must agree across build metadata, runtime
+`__version__`, lockfile package metadata, the current requirements/design target,
+and the leading changelog entry. Generated `PKG-INFO` present in a built sdist must
+carry that same version. Tests must derive the expected identity from authoritative
+build metadata instead of embedding the candidate version as an oracle.
+
+### R-TEST-001 — Deterministic hierarchical lock evidence
+
+The maintained hierarchical-lock regression must use a deterministic oracle for
+Linux `flock` conflict and compatibility semantics. It must not depend on spawned
+pytest-module importability, process-startup timing, queue delivery, or child-process
+teardown. The primary regression may use separately opened file descriptions in
+one process because `flock` ownership/conflict is defined on open file descriptions;
+process lifecycle is not part of the behavior under test. A separate installed-artifact
+process smoke may supplement this evidence but must not become the regression oracle.
+
+### R-PART-011 — Recovery group-wide source prevalidation
+
+When restart recovery sees a complete pending manifest-format-3 archive-unit group,
+it must verify every pending committed unit and validate every remaining selected
+source across the complete group before deleting any source entry from that group.
+A mismatch in a later unit that exists before recovery begins must therefore leave
+earlier-unit sources untouched. Per-unit revalidation immediately before unlink
+remains required.
+
+## 32. 0.5.0b1 beta entry decision
+
+The first 0.5 beta candidate is permitted only after all of these conditions hold
+on the exact final candidate:
+
+1. SA-001, SA-002 and SA-003 from the isolated `0.4.0a5` sdist reviews are closed by a clean-sdist verification run;
+2. every maintained requirement identifier is unique;
+3. current package, requirements, design, lockfile, changelog and generated sdist metadata agree on the beta identity;
+4. the archive-unit recovery regression for a changed later-unit source fails on the exact `0.5.0a2` predecessor and passes on the candidate;
+5. the deterministic hierarchical-lock regressions pass repeatedly without process-startup, queue/import-mode, or teardown dependence;
+6. source-tree, clean-sdist and installed-wheel verification pass on an available declared Python version;
+7. Deep Consistency Review reaches `complete-for-declared-scope` for the declared beta scope with no unresolved release-blocking finding; and
+8. unavailable supported runtimes, static tools, filesystem classes, power-loss tests, and specialist assurance remain explicit limitations rather than implied passes.
+
+Promotion to beta records maturity of this source candidate only. It does not establish production approval, external publication, independent review, or unqualified crash durability beyond the documented local-filesystem assumptions.
+
+
+## 33. 0.5.0b2 isolated-review closure contract
+
+### R-VERIFY-006 — Ownership evidence is validated before policy filtering
+
+Policy-scoped verification must validate the manifest evidence needed to establish
+`policy_name` and `source_root` before using those fields to exclude a candidate as
+foreign-owned. Malformed JSON, a non-regular or symlinked manifest, missing ownership
+fields, invalid ownership field types, an empty ownership value, or a non-absolute
+`source_root` must fail verification rather than become a foreign-owner skip. A valid
+foreign-owned manifest may still be excluded before payload verification.
+
+### R-CAP-007 — Subdivided stream capacity telemetry preserves stream semantics
+
+When one logical stream is subdivided into several archive units, every per-unit
+capacity precheck must report the complete logical stream's selected regular source
+bytes as `current_stream_source_bytes`. `remaining_source_bytes` continues to decrease
+as archive units complete. The existing field must not be silently redefined to mean
+current archive-unit bytes.
+
+### R-PY-001 — Supported Python runtime range
+
+The supported Python runtime range for the 0.5 line is Python 3.11 through 3.13.
+Package Core Metadata must encode `>=3.11,<3.14`; runtime-version classifiers must
+name 3.11, 3.12, and 3.13; public support documentation must state the same range;
+and the system installer must reject Python selectors outside those minor versions
+before performing privileged or installation mutations. Patch-level selectors within
+a supported minor version are permitted.
+
+### R-TEST-002 — Isolated-review closure sensitivity
+
+Maintained regressions must distinguish the `0.5.0b1` defects for malformed
+policy-scoped ownership evidence, archive-unit/logical-stream capacity accounting,
+and the open-ended Python support contract. Release verification must exercise the
+source tree, clean source distribution, and installed wheel after these corrections.

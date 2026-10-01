@@ -183,7 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 LOGGER,
                 logging.WARNING,
                 "legacy_lock_file_ignored",
-                "--lock-file is deprecated and does not define the 0.4 resource lock domain",
+                "--lock-file is deprecated and does not define the current resource lock domain",
                 path=arguments.lock_file,
                 operation="lock",
                 outcome="ignored",

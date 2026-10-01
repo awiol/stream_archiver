@@ -44,8 +44,8 @@ def test_behavior_tests_explain_setup_and_contract() -> None:
     assert missing == []
 
 
-def test_canonical_schema_three_example_parses_with_explicit_discovery_controls() -> None:
-    """The user-facing example exercises the current configuration schema."""
+def test_canonical_current_example_parses_with_explicit_discovery_controls() -> None:
+    """The user-facing example exercises the current configuration schema and controls."""
 
     from stream_archiver.config import StreamPartition, load_config
 
@@ -55,3 +55,56 @@ def test_canonical_schema_three_example_parses_with_explicit_discovery_controls(
     assert all(policy.recursive for policy in config.policies)
     assert config.policies[0].stream_partition is StreamPartition.SOURCE_ROOT
     assert config.policies[1].stream_partition is StreamPartition.PARENT_DIRECTORY
+
+
+def test_requirement_identifiers_are_unique() -> None:
+    """DCR traceability requires one semantic meaning for every maintained requirement ID."""
+
+    import re
+
+    requirements = (Path(__file__).parents[1] / "docs" / "requirements.md").read_text(
+        encoding="utf-8"
+    )
+    identifiers = re.findall(r"(?m)^###\s+(R-[A-Z0-9-]+)\b", requirements)
+
+    assert len(identifiers) == len(set(identifiers))
+
+
+def test_every_requirement_family_is_routed_by_design_traceability() -> None:
+    """R-DOC-002: each maintained requirement family has a design route."""
+
+    import re
+
+    root = Path(__file__).parents[1]
+    requirements = (root / "docs" / "requirements.md").read_text(encoding="utf-8")
+    design = (root / "docs" / "design.md").read_text(encoding="utf-8")
+    families = set(re.findall(r"(?m)^###\s+(R-[A-Z]+)-\d+\b", requirements))
+    traceability = design.split("## 16. Requirement-to-design traceability", 1)[1].split(
+        "## 17.", 1
+    )[0]
+    routed = set(re.findall(r"R-[A-Z]+", traceability))
+
+    assert families <= routed
+
+
+def test_source_user_artifacts_referenced_by_the_distribution_contract_exist() -> None:
+    """R-DIST-001: a source-user checkout/sdist carries its local docs, tools, and examples."""
+
+    root = Path(__file__).parents[1]
+    required = (
+        "CHANGELOG.md",
+        "uv.lock",
+        "docs/requirements.md",
+        "docs/design.md",
+        "docs/verification.md",
+        "docs/operations.md",
+        "docs/user-guide.md",
+        "examples/config/policies.toml",
+        "tools/bootstrap-dev.sh",
+        "tools/install-systemd.sh",
+        "tools/verify-local.sh",
+        "tools/verify-systemd.py",
+        "tests/helpers.py",
+    )
+
+    assert [relative for relative in required if not (root / relative).is_file()] == []

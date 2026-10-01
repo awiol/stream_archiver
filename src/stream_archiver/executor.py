@@ -565,6 +565,22 @@ def recover_pending_archives(
                     _ensure_success_evidence(child, manifest)
                 else:
                     _verify_committed_pending_archive(child, manifest)
+
+            # The logical stream is the cleanup transaction group. Validate every
+            # still-pending unit's remaining selected sources before the first
+            # unlink so a mismatch that already exists in a later unit cannot be
+            # discovered only after an earlier unit has been partially cleaned.
+            # _recover_manifest() revalidates each unit again immediately before
+            # its own cleanup to preserve the existing source-race fail-closed
+            # boundary.
+            for _child, manifest in pending:
+                _validate_all_sources(
+                    manifest,
+                    source_root,
+                    error_type=RecoveryError,
+                    allow_missing=True,
+                )
+
             for child, manifest in sorted(pending, key=lambda item: item[1]["archive_unit_index"]):
                 log_event(
                     LOGGER,
@@ -1020,15 +1036,30 @@ def _checksums_document(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _validate_all_sources(manifest: dict[str, Any], source_root: Path) -> None:
+def _validate_all_sources(
+    manifest: dict[str, Any],
+    source_root: Path,
+    *,
+    error_type: type[ExecutionError | RecoveryError] = ExecutionError,
+    allow_missing: bool = False,
+) -> None:
+    """Validate selected source records using the requested recovery semantics.
+
+    Normal execution requires every selected source to remain present. Recovery
+    may encounter entries already unlinked before an interrupted durability step;
+    those missing entries are accepted only when ``allow_missing`` is true.
+    """
+
     for record in manifest["entries"]:
         action = ActionKind(record["action"])
         if action is ActionKind.SKIP_SYMLINK:
             continue
         source = source_root / Path(record["source_path"])
         if not os.path.lexists(source):
-            raise ExecutionError(f"selected source disappeared before cleanup: {source}")
-        _validate_source_record(source, record, error_type=ExecutionError)
+            if allow_missing:
+                continue
+            raise error_type(f"selected source disappeared before cleanup: {source}")
+        _validate_source_record(source, record, error_type=error_type)
 
 
 def _remove_sources(
@@ -1437,9 +1468,13 @@ def _validate_manifest(
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             raise error_type(f"invalid {key} in archive manifest {path}")
     archive_name = manifest["archive_name"]
+    plan_id = manifest["plan_id"]
     unit_index = manifest.get("archive_unit_index", 0) if version == MANIFEST_FORMAT_VERSION else 0
-    if is_current_archive_name(archive_name) and not current_archive_name_matches_plan(
-        archive_name, manifest["plan_id"], unit_index=unit_index
+    current_name = is_current_archive_name(archive_name)
+    if (version == MANIFEST_FORMAT_VERSION or current_name) and not _is_sha256(plan_id):
+        raise error_type(f"invalid plan_id in archive manifest {path}")
+    if current_name and not current_archive_name_matches_plan(
+        archive_name, plan_id, unit_index=unit_index
     ):
         raise error_type(
             f"archive identity suffix does not match plan_id in archive manifest {path}"

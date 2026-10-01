@@ -32,3 +32,6 @@ dist/
 # Project-local verification/delivery by-products
 /SHA256SUMS
 *.log
+
+# User-local project state (never source/distribution authority)
+/local/
